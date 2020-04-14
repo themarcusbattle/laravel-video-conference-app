@@ -13,7 +13,7 @@ $ git clone git@github.com:themarcusbattle/laravel-video-chat-room.git
 Then run the npm installer
 
 ```bash
-$ cd laravel-video-chat-room && npm install
+$ cd laravel-video-chat-room && npm install && composer install
 ```
 
 Start the application using the Laravel artisan command:
