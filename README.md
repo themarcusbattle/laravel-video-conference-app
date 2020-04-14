@@ -10,10 +10,33 @@ To install on your computer, run the following command in your terminal:
 $ git clone git@github.com:themarcusbattle/laravel-video-chat-room.git
 ```
 
-Then run the npm installer
+Install all dependencies:
 
 ```bash
 $ cd laravel-video-chat-room && npm install && composer install
+```
+
+Create a new `.env` file and generate a new application key.
+
+```bash
+$ cp .env.example .env
+$ php artisan key:generate
+```
+
+Add your Twilio Credentials to the `.env` file. If you do not have a Twilio account, you can [create a free one and receive $10 in credit](http://www.twilio.com/referral/5PFGwv).
+
+You’ll need to copy the Account SID from your [account dashboard](https://www.twilio.com/console). An API Key and API Secret will need to be created from your [API Keys list](https://www.twilio.com/console/video/project/api-keys/create).
+
+```
+TWILIO_ACCOUNT_SID="Insert your Account SID"
+TWILIO_API_KEY_SID="Insert your API Key"
+TWILIO_API_KEY_SECRET="Insert your API Secret"
+```
+
+Lastly, clear the Laravel cache to ensure that your dotenv variable are loaded:
+
+```bash
+$ php artisan config:clear
 ```
 
 Start the application using the Laravel artisan command:
@@ -22,4 +45,6 @@ Start the application using the Laravel artisan command:
 $ php artisan serve
 ```
 
-Visit `http://127.0.0.1:8000/` and connect to your friends
+Visit `http://127.0.0.1:8000/` and test things out! 
+
+**NOTE:** You will only be able to use this in production under https.
