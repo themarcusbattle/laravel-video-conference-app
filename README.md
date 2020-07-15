@@ -16,10 +16,15 @@ Install all dependencies:
 $ cd laravel-video-chat-room && npm install && composer install
 ```
 
-Create a new `.env` file and generate a new application key.
+Create a new `.env` file.
 
 ```bash
 $ cp .env.example .env
+```
+
+Update the database credentials and generate a new application key.
+
+```bash
 $ php artisan key:generate
 ```
 

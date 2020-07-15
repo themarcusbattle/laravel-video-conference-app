@@ -15,7 +15,8 @@
         "laravel/framework": "^7.0",
         "laravel/tinker": "^2.0",
         "laravel/ui": "^2.0",
-        "twilio/sdk": "^6.2"
+        "twilio/sdk": "^6.2",
+        "symfony/translation": "4.3.8"
     },
     "require-dev": {
         "facade/ignition": "^2.0",
