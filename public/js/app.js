@@ -98,16 +98,16 @@
 
 var flatMap = __webpack_require__(/*! ./util */ "./node_modules/@twilio/webrtc/lib/util/index.js").flatMap;
 var guessBrowser = __webpack_require__(/*! ./util */ "./node_modules/@twilio/webrtc/lib/util/index.js").guessBrowser;
+var guessBrowserVersion = __webpack_require__(/*! ./util */ "./node_modules/@twilio/webrtc/lib/util/index.js").guessBrowserVersion;
 var getSdpFormat = __webpack_require__(/*! ./util/sdp */ "./node_modules/@twilio/webrtc/lib/util/sdp.js").getSdpFormat;
 
 var guess = guessBrowser();
+var guessVersion = guessBrowserVersion();
 var isChrome = guess === 'chrome';
 var isFirefox = guess === 'firefox';
 var isSafari = guess === 'safari';
 
-var chromeMajorVersion = isChrome
-  ? parseInt(navigator.userAgent.match(/Chrome\/([0-9]+)/)[1], 10)
-  : null;
+var chromeMajorVersion = isChrome ? guessVersion.major : null;
 
 var CHROME_LEGACY_MAX_AUDIO_LEVEL = 32767;
 
@@ -156,9 +156,11 @@ function _getStats(peerConnection, options) {
     return tracks.map(function(track) {
       return getTrackStats(peerConnection, track, Object.assign({
         isRemote: isRemote
-      }, options)).then(function(stats) {
-        stats.trackId = track.id;
-        statsResponse[statsArrayName].push(stats);
+      }, options)).then(function(trackStatsArray) {
+        trackStatsArray.forEach(function(trackStats) {
+          trackStats.trackId = track.id;
+          statsResponse[statsArrayName].push(trackStats);
+        });
       });
     });
   });
@@ -259,13 +261,13 @@ function standardizeChromeOrSafariActiveIceCandidatePairStats(stats) {
     { key: 'responsesSent', type: 'number' },
     { key: 'retransmissionsReceived', type: 'number' },
     { key: 'retransmissionsSent', type: 'number' },
-    { key: 'state', type: 'string' },
+    { key: 'state', type: 'string', fixup: function(state) { return state === 'inprogress' ? 'in-progress' : state; } },
     { key: 'totalRoundTripTime', type: 'number' },
     { key: 'transportId', type: 'string' },
     { key: 'writable', type: 'boolean' }
   ].reduce(function(report, keyInfo) {
     report[keyInfo.key] = typeof activeCandidatePairStats[keyInfo.key] === keyInfo.type
-      ? activeCandidatePairStats[keyInfo.key]
+      ? (keyInfo.fixup ? keyInfo.fixup(activeCandidatePairStats[keyInfo.key]) : activeCandidatePairStats[keyInfo.key])
       : null;
     return report;
   }, {
@@ -401,7 +403,7 @@ function getTracks(peerConnection, kind, localOrRemote) {
  * @param {RTCPeerConnection} peerConnection
  * @param {MediaStreamTrack} track
  * @param {object} [options] - Used for testing
- * @returns {Promise.<StandardizedTrackStatsReport>}
+ * @returns {Promise.<Array<StandardizedTrackStatsReport>>}
  */
 function getTrackStats(peerConnection, track, options) {
   options = options || {};
@@ -431,13 +433,13 @@ function getTrackStats(peerConnection, track, options) {
  * Get the standardized statistics for a particular MediaStreamTrack in Chrome or Safari.
  * @param {RTCPeerConnection} peerConnection
  * @param {MediaStreamTrack} track
- * @returns {Promise.<StandardizedTrackStatsReport>}
+ * @returns {Promise.<Array<StandardizedTrackStatsReport>>}
  */
 function chromeOrSafariGetTrackStats(peerConnection, track) {
   return new Promise(function(resolve, reject) {
     if (chromeMajorVersion && chromeMajorVersion < 67) {
       peerConnection.getStats(function(response) {
-        resolve(standardizeChromeLegacyStats(response, track));
+        resolve([standardizeChromeLegacyStats(response, track)]);
       }, null, reject);
       return;
     }
@@ -452,12 +454,12 @@ function chromeOrSafariGetTrackStats(peerConnection, track) {
  * @param {RTCPeerConnection} peerConnection
  * @param {MediaStreamTrack} track
  * @param {boolean} isRemote
- * @returns {Promise.<StandardizedTrackStatsReport>}
+ * @returns {Promise.<Array<StandardizedTrackStatsReport>>}
  */
 function firefoxGetTrackStats(peerConnection, track, isRemote) {
   return new Promise(function(resolve, reject) {
     peerConnection.getStats(track).then(function(response) {
-      resolve(standardizeFirefoxStats(response, isRemote));
+      resolve([standardizeFirefoxStats(response, isRemote)]);
     }, reject);
   });
 }
@@ -539,11 +541,17 @@ function standardizeChromeLegacyStats(response, track) {
 /**
  * Standardize the MediaStreamTrack's statistics in Chrome or Safari.
  * @param {RTCStatsResponse} response
- * @returns {StandardizedTrackStatsReport}
+ * @returns {Array<StandardizedTrackStatsReport>}
  */
 function standardizeChromeOrSafariStats(response) {
   var inbound = null;
-  var outbound = null;
+
+  // NOTE(mpatwardhan): We should expect more than one "outbound-rtp" stats for a
+  // VP8 simulcast MediaStreamTrack.
+  var outbound = [];
+
+  var remoteInbound = null;
+  var remoteOutbound = null;
   var track = null;
   var codec = null;
 
@@ -553,7 +561,7 @@ function standardizeChromeOrSafariStats(response) {
         inbound = stat;
         break;
       case 'outbound-rtp':
-        outbound = stat;
+        outbound.push(stat);
         break;
       case 'track':
         track = stat;
@@ -561,115 +569,123 @@ function standardizeChromeOrSafariStats(response) {
       case 'codec':
         codec = stat;
         break;
+      case 'remote-inbound-rtp':
+        remoteInbound = stat;
+        break;
+      case 'remote-outbound-rtp':
+        remoteOutbound = stat;
+        break;
     }
   });
 
   var isRemote = track && track.remoteSource;
-  var standardizedStats = {};
+  var mainSources = isRemote ? [inbound] : outbound;
+  var stats = [];
+  var remoteSource = isRemote ? remoteOutbound : remoteInbound; // remote rtp stats
 
-  var first = isRemote ? inbound : outbound;
-  var second = track;
-  var third = codec;
+  mainSources.forEach(function(source) {
+    var standardizedStats = {};
+    var statSources = [
+      source, // local rtp stats
+      track,
+      codec,
+      remoteSource && remoteSource.ssrc === source.ssrc ? remoteSource : null, // remote rtp stats
+    ];
 
-  function getStatValue(name) {
-    if (first && typeof first[name] !== 'undefined') {
-      return first[name];
+    function getStatValue(name) {
+      var sourceFound = statSources.find(function(statSource) {
+        return statSource && typeof statSource[name] !== 'undefined';
+      }) || null;
+
+      return sourceFound ? sourceFound[name] : null;
     }
 
-    if (second && typeof second[name] !== 'undefined') {
-      return second[name];
+    var ssrc = getStatValue('ssrc');
+    if (typeof ssrc === 'number') {
+      standardizedStats.ssrc = String(ssrc);
     }
 
-    if (third && typeof third[name] !== 'undefined') {
-      return third[name];
+    var timestamp = getStatValue('timestamp');
+    standardizedStats.timestamp = Math.round(timestamp);
+
+    var mimeType = getStatValue('mimeType');
+    if (typeof mimeType === 'string') {
+      mimeType = mimeType.split('/');
+      standardizedStats.codecName = mimeType[mimeType.length - 1];
     }
 
-    return null;
-  }
-
-  var ssrc = getStatValue('ssrc');
-  if (typeof ssrc === 'number') {
-    standardizedStats.ssrc = String(ssrc);
-  }
-
-  var timestamp = getStatValue('timestamp');
-  standardizedStats.timestamp = Math.round(timestamp);
-
-  var mimeType = getStatValue('mimeType');
-  if (typeof mimeType === 'string') {
-    mimeType = mimeType.split('/');
-    standardizedStats.codecName = mimeType[mimeType.length - 1];
-  }
-
-  var roundTripTime = getStatValue('roundTripTime');
-  if (typeof roundTripTime === 'number') {
-    standardizedStats.roundTripTime = roundTripTime;
-  }
-
-  var jitter = getStatValue('jitter');
-  if (typeof jitter === 'number') {
-    standardizedStats.jitter = Math.round(jitter * 1000);
-  }
-
-  var frameWidth = getStatValue('frameWidth');
-  if (typeof frameWidth === 'number') {
-    if (isRemote) {
-      standardizedStats.frameWidthReceived = frameWidth;
-    } else {
-      standardizedStats.frameWidthSent = frameWidth;
+    var roundTripTime = getStatValue('roundTripTime');
+    if (typeof roundTripTime === 'number') {
+      standardizedStats.roundTripTime = Math.round(roundTripTime * 1000);
     }
-  }
 
-  var frameHeight = getStatValue('frameHeight');
-  if (typeof frameHeight === 'number') {
-    if (isRemote) {
-      standardizedStats.frameHeightReceived = frameHeight;
-    } else {
-      standardizedStats.frameHeightSent = frameHeight;
+    var jitter = getStatValue('jitter');
+    if (typeof jitter === 'number') {
+      standardizedStats.jitter = Math.round(jitter * 1000);
     }
-  }
 
-  var framesPerSecond = getStatValue('framesPerSecond');
-  if (typeof framesPerSecond === 'number') {
-    standardizedStats.frameRateSent = framesPerSecond;
-  }
-
-  var bytesReceived = getStatValue('bytesReceived');
-  if (typeof bytesReceived === 'number') {
-    standardizedStats.bytesReceived = bytesReceived;
-  }
-
-  var bytesSent = getStatValue('bytesSent');
-  if (typeof bytesSent === 'number') {
-    standardizedStats.bytesSent = bytesSent;
-  }
-
-  var packetsLost = getStatValue('packetsLost');
-  if (typeof packetsLost === 'number') {
-    standardizedStats.packetsLost = packetsLost;
-  }
-
-  var packetsReceived = getStatValue('packetsReceived');
-  if (typeof packetsReceived === 'number') {
-    standardizedStats.packetsReceived = packetsReceived;
-  }
-
-  var packetsSent = getStatValue('packetsSent');
-  if (typeof packetsSent === 'number') {
-    standardizedStats.packetsSent = packetsSent;
-  }
-
-  var audioLevel = getStatValue('audioLevel');
-  if (typeof audioLevel === 'number') {
-    audioLevel = Math.round(audioLevel * CHROME_LEGACY_MAX_AUDIO_LEVEL);
-    if (isRemote) {
-      standardizedStats.audioOutputLevel = audioLevel;
-    } else {
-      standardizedStats.audioInputLevel = audioLevel;
+    var frameWidth = getStatValue('frameWidth');
+    if (typeof frameWidth === 'number') {
+      if (isRemote) {
+        standardizedStats.frameWidthReceived = frameWidth;
+      } else {
+        standardizedStats.frameWidthSent = frameWidth;
+      }
     }
-  }
 
-  return standardizedStats;
+    var frameHeight = getStatValue('frameHeight');
+    if (typeof frameHeight === 'number') {
+      if (isRemote) {
+        standardizedStats.frameHeightReceived = frameHeight;
+      } else {
+        standardizedStats.frameHeightSent = frameHeight;
+      }
+    }
+
+    var framesPerSecond = getStatValue('framesPerSecond');
+    if (typeof framesPerSecond === 'number') {
+      standardizedStats.frameRateSent = framesPerSecond;
+    }
+
+    var bytesReceived = getStatValue('bytesReceived');
+    if (typeof bytesReceived === 'number') {
+      standardizedStats.bytesReceived = bytesReceived;
+    }
+
+    var bytesSent = getStatValue('bytesSent');
+    if (typeof bytesSent === 'number') {
+      standardizedStats.bytesSent = bytesSent;
+    }
+
+    var packetsLost = getStatValue('packetsLost');
+    if (typeof packetsLost === 'number') {
+      standardizedStats.packetsLost = packetsLost;
+    }
+
+    var packetsReceived = getStatValue('packetsReceived');
+    if (typeof packetsReceived === 'number') {
+      standardizedStats.packetsReceived = packetsReceived;
+    }
+
+    var packetsSent = getStatValue('packetsSent');
+    if (typeof packetsSent === 'number') {
+      standardizedStats.packetsSent = packetsSent;
+    }
+
+    var audioLevel = getStatValue('audioLevel');
+    if (typeof audioLevel === 'number') {
+      audioLevel = Math.round(audioLevel * CHROME_LEGACY_MAX_AUDIO_LEVEL);
+      if (isRemote) {
+        standardizedStats.audioOutputLevel = audioLevel;
+      } else {
+        standardizedStats.audioInputLevel = audioLevel;
+      }
+    }
+
+    stats.push(standardizedStats);
+  });
+
+  return stats;
 }
 
 /**
@@ -754,7 +770,10 @@ function standardizeFirefoxStats(response, isRemote) {
 
   var roundTripTime = getStatValue('roundTripTime');
   if (typeof roundTripTime === 'number') {
-    standardizedStats.roundTripTime = roundTripTime;
+    // roundTripTime is double - measured in seconds.
+    // https://www.w3.org/TR/webrtc-stats/#dom-rtcremoteinboundrtpstreamstats-roundtriptime
+    // cover it to milliseconds (and make it integer)
+    standardizedStats.roundTripTime = Math.round(roundTripTime * 1000);
   }
 
   var jitter = getStatValue('jitter');
@@ -881,38 +900,27 @@ module.exports = getStats;
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
+/* globals navigator */
 
 
 /**
- * This function is very similar to <code>navigator.getUserMedia</code> except
- * that it does not use callbacks and returns a Promise for a MediaStream
+ * This function is very similar to <code>navigator.mediaDevices.getUserMedia</code>
+ * except that if no MediaStreamConstraints are provided, then bot audio and video
+ * are requested.
  * @function getUserMedia
  * @param {MediaStreamConstraints} [constraints={audio:true,video:true}] - the
- *   MediaStreamConstraints object specifying what kind of LocalMediaStream to
+ *   MediaStreamConstraints object specifying what kind of MediaStream to
  *   request from the browser (by default both audio and video)
  * @returns Promise<MediaStream>
  */
 function getUserMedia(constraints) {
-  return new Promise(function getUserMediaPromise(resolve, reject) {
-    _getUserMedia(constraints || { audio: true, video: true }, resolve, reject);
-  });
-}
-
-function _getUserMedia(constraints, onSuccess, onFailure) {
-  if (typeof window !== 'undefined' && typeof navigator !== 'undefined') {
-    if (typeof navigator.mediaDevices === 'object' &&
-        typeof navigator.mediaDevices.getUserMedia === 'function') {
-      navigator.mediaDevices.getUserMedia(constraints).then(onSuccess, onFailure);
-      return;
-    } else if (typeof navigator.webkitGetUserMedia === 'function') {
-      navigator.webkitGetUserMedia(constraints, onSuccess, onFailure);
-      return;
-    } else if (typeof navigator.mozGetUserMedia === 'function') {
-      navigator.mozGetUserMedia(constraints, onSuccess, onFailure);
-      return;
-    }
+  if (typeof navigator === 'object'
+    && typeof navigator.mediaDevices === 'object'
+    && typeof navigator.mediaDevices.getUserMedia === 'function') {
+    constraints = constraints || { audio: true, video: true };
+    return navigator.mediaDevices.getUserMedia(constraints);
   }
-  onFailure(new Error('getUserMedia is not supported'));
+  return Promise.reject(new Error('getUserMedia is not supported'));
 }
 
 module.exports = getUserMedia;
@@ -983,11 +991,11 @@ module.exports = WebRTC;
 /* globals MediaStream */
 
 
-if (typeof MediaStream !== 'undefined') {
+if (typeof MediaStream === 'function') {
   module.exports = MediaStream;
 } else {
   module.exports = function MediaStream() {
-    throw new Error('WebRTC is not supported in this browser');
+    throw new Error('MediaStream is not supported');
   };
 }
 
@@ -1005,11 +1013,11 @@ if (typeof MediaStream !== 'undefined') {
 /* global MediaStreamTrack */
 
 
-if (typeof MediaStreamTrack !== 'undefined') {
+if (typeof MediaStreamTrack === 'function') {
   module.exports = MediaStreamTrack;
 } else {
   module.exports = function MediaStreamTrack() {
-    throw new Error('WebRTC is not supported in this browser');
+    throw new Error('MediaStreamTrack is not supported');
   };
 }
 
@@ -1024,16 +1032,14 @@ if (typeof MediaStreamTrack !== 'undefined') {
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
-/* global mozRTCIceCandidate, RTCIceCandidate */
+/* global RTCIceCandidate */
 
 
-if (typeof RTCIceCandidate !== 'undefined') {
+if (typeof RTCIceCandidate === 'function') {
   module.exports = RTCIceCandidate;
-} else if (typeof mozRTCIceCandidate !== 'undefined') {
-  module.exports = mozRTCIceCandidate;
 } else {
   module.exports = function RTCIceCandidate() {
-    throw new Error('WebRTC is unsupported');
+    throw new Error('RTCIceCandidate is not supported');
   };
 }
 
@@ -1926,7 +1932,7 @@ module.exports = FirefoxRTCPeerConnection;
 "use strict";
 
 
-if (typeof RTCPeerConnection !== 'undefined') {
+if (typeof RTCPeerConnection === 'function') {
   var guessBrowser = __webpack_require__(/*! ../util */ "./node_modules/@twilio/webrtc/lib/util/index.js").guessBrowser;
   switch (guessBrowser()) {
     case 'chrome':
@@ -1940,7 +1946,12 @@ if (typeof RTCPeerConnection !== 'undefined') {
       break;
     default:
       module.exports = RTCPeerConnection;
+      break;
   }
+} else {
+  module.exports = function RTCPeerConnection() {
+    throw new Error('RTCPeerConnection is not supported');
+  };
 }
 
 
@@ -2459,9 +2470,8 @@ module.exports = ChromeRTCSessionDescription;
 "use strict";
 /* globals RTCSessionDescription */
 
-module.exports = typeof RTCSessionDescription !== 'undefined'
-  ? RTCSessionDescription
-  : window.mozRTCSessionDescription;
+
+module.exports = RTCSessionDescription;
 
 
 /***/ }),
@@ -2474,22 +2484,26 @@ module.exports = typeof RTCSessionDescription !== 'undefined'
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
+/* globals RTCSessionDescription */
 
 
-var guessBrowser = __webpack_require__(/*! ../util */ "./node_modules/@twilio/webrtc/lib/util/index.js").guessBrowser;
-
-switch (guessBrowser()) {
-  case 'chrome':
-    module.exports = __webpack_require__(/*! ./chrome */ "./node_modules/@twilio/webrtc/lib/rtcsessiondescription/chrome.js");
-    break;
-  case 'firefox':
-    module.exports = __webpack_require__(/*! ./firefox */ "./node_modules/@twilio/webrtc/lib/rtcsessiondescription/firefox.js");
-    break;
-  default:
-    if (typeof RTCSessionDescription === 'undefined') {
+if (typeof RTCSessionDescription === 'function') {
+  var guessBrowser = __webpack_require__(/*! ../util */ "./node_modules/@twilio/webrtc/lib/util/index.js").guessBrowser;
+  switch (guessBrowser()) {
+    case 'chrome':
+      module.exports = __webpack_require__(/*! ./chrome */ "./node_modules/@twilio/webrtc/lib/rtcsessiondescription/chrome.js");
       break;
-    }
-    module.exports = RTCSessionDescription;
+    case 'firefox':
+      module.exports = __webpack_require__(/*! ./firefox */ "./node_modules/@twilio/webrtc/lib/rtcsessiondescription/firefox.js");
+      break;
+    default:
+      module.exports = RTCSessionDescription;
+      break;
+  }
+} else {
+  module.exports = function RTCSessionDescription() {
+    throw new Error('RTCSessionDescription is not supported');
+  };
 }
 
 
@@ -2661,22 +2675,65 @@ function flatMap(list, mapFn) {
 }
 
 /**
+ * Get the browser's user agent, if available.
+ * @returns {?string}
+ */
+function getUserAgent() {
+  return typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string'
+    ? navigator.userAgent
+    : null;
+}
+
+/**
  * Guess the browser.
+ * @param {string} [userAgent=navigator.userAgent]
  * @returns {?string} browser - "chrome", "firefox", "safari", or null
  */
-function guessBrowser() {
-  if (typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string') {
-    if (/Chrome/.test(navigator.userAgent)) {
-      return 'chrome';
-    }
-    if (/Firefox/.test(navigator.userAgent)) {
-      return 'firefox';
-    }
-    if (/Safari/.test(navigator.userAgent)) {
-      return 'safari';
-    }
+function guessBrowser(userAgent) {
+  if (typeof userAgent === 'undefined') {
+    userAgent = getUserAgent();
+  }
+  if (/Chrome|CriOS/.test(userAgent)) {
+    return 'chrome';
+  }
+  if (/Firefox|FxiOS/.test(userAgent)) {
+    return 'firefox';
+  }
+  if (/Safari/.test(userAgent)) {
+    return 'safari';
   }
   return null;
+}
+
+/**
+ * Guess the browser version.
+ * @param {string} [userAgent=navigator.userAgent]
+ * @returns {?{major: number, minor: number}}
+ */
+function guessBrowserVersion(userAgent) {
+  if (typeof userAgent === 'undefined') {
+    userAgent = getUserAgent();
+  }
+  var prefix = {
+    chrome: 'Chrome|CriOS',
+    firefox: 'Firefox|FxiOS',
+    safari: 'Version'
+  }[guessBrowser(userAgent)];
+
+  if (!prefix) {
+    return null;
+  }
+  var regex = new RegExp('(' + prefix + ')/([^\\s]+)');
+  var match = (userAgent.match(regex) || [])[2];
+
+  if (!match) {
+    return null;
+  }
+  var versions = match.split('.').map(Number);
+  return {
+    major: isNaN(versions[0]) ? null : versions[0],
+    minor: isNaN(versions[1]) ? null : versions[1]
+  };
 }
 
 /**
@@ -2786,6 +2843,17 @@ function proxyProperty(source, wrapper, target, propertyName) {
 }
 
 /**
+ * Check whether native WebRTC APIs are supported.
+ * @returns {boolean}
+ */
+function support() {
+  return typeof navigator === 'object'
+    && typeof navigator.mediaDevices === 'object'
+    && typeof navigator.mediaDevices.getUserMedia === 'function'
+    && typeof RTCPeerConnection === 'function';
+}
+
+/**
  * @typedef {object} Deferred
  * @property {Promise} promise
  * @property {function} reject
@@ -2797,10 +2865,12 @@ exports.delegateMethods = delegateMethods;
 exports.difference = difference;
 exports.flatMap = flatMap;
 exports.guessBrowser = guessBrowser;
+exports.guessBrowserVersion = guessBrowserVersion;
 exports.interceptEvent = interceptEvent;
 exports.legacyPromise = legacyPromise;
 exports.makeUUID = makeUUID;
 exports.proxyProperties = proxyProperties;
+exports.support = support;
 
 
 /***/ }),
@@ -3254,10 +3324,10 @@ exports.updateUnifiedPlanTrackIdsToSSRCs = updateUnifiedPlanTrackIdsToSSRCs;
 /*!**************************************************!*\
   !*** ./node_modules/@twilio/webrtc/package.json ***!
   \**************************************************/
-/*! exports provided: _args, _from, _id, _inBundle, _integrity, _location, _phantomChildren, _requested, _requiredBy, _resolved, _spec, _where, author, bugs, contributors, description, devDependencies, homepage, keywords, license, main, name, repository, scripts, version, default */
+/*! exports provided: _from, _id, _inBundle, _integrity, _location, _phantomChildren, _requested, _requiredBy, _resolved, _shasum, _spec, _where, author, bugs, bundleDependencies, contributors, deprecated, description, devDependencies, homepage, keywords, license, main, name, repository, scripts, version, default */
 /***/ (function(module) {
 
-module.exports = JSON.parse("{\"_args\":[[\"@twilio/webrtc@4.1.3\",\"/Users/mbattle/Sites/laravel-video-conference-app\"]],\"_from\":\"@twilio/webrtc@4.1.3\",\"_id\":\"@twilio/webrtc@4.1.3\",\"_inBundle\":false,\"_integrity\":\"sha512-0KjCrrpczoWQTO5RSBg+ZCDvrlgjBLhjPYN9SKstlIsOnEgtg6H1EsUt6CP7FFWLh9J3iQNuclC1gVib1PQpKw==\",\"_location\":\"/@twilio/webrtc\",\"_phantomChildren\":{},\"_requested\":{\"type\":\"version\",\"registry\":true,\"raw\":\"@twilio/webrtc@4.1.3\",\"name\":\"@twilio/webrtc\",\"escapedName\":\"@twilio%2fwebrtc\",\"scope\":\"@twilio\",\"rawSpec\":\"4.1.3\",\"saveSpec\":null,\"fetchSpec\":\"4.1.3\"},\"_requiredBy\":[\"/twilio-video\"],\"_resolved\":\"https://registry.npmjs.org/@twilio/webrtc/-/webrtc-4.1.3.tgz\",\"_spec\":\"4.1.3\",\"_where\":\"/Users/mbattle/Sites/laravel-video-conference-app\",\"author\":{\"name\":\"Manjesh Malavalli\",\"email\":\"mmalavalli@twilio.com\"},\"bugs\":{\"url\":\"https://github.com/twilio/twilio-webrtc.js/issues\"},\"contributors\":[{\"name\":\"Mark Roberts\",\"email\":\"mroberts@twilio.com\"},{\"name\":\"Ryan Rowland\",\"email\":\"rrowland@twilio.com\"}],\"description\":\"WebRTC-related APIs and shims used by twilio-video.js\",\"devDependencies\":{\"browserify\":\"^14.4.0\",\"electron\":\"^5.0.0\",\"envify\":\"^4.1.0\",\"eslint\":\"^4.4.1\",\"istanbul\":\"^0.4.5\",\"karma\":\"^1.7.0\",\"karma-browserify\":\"^5.1.1\",\"karma-chrome-launcher\":\"^2.2.0\",\"karma-electron\":\"^6.1.0\",\"karma-firefox-launcher\":\"^1.0.1\",\"karma-mocha\":\"^1.3.0\",\"karma-safari-launcher\":\"~0.1\",\"karma-spec-reporter\":\"0.0.31\",\"mocha\":\"^3.5.0\",\"npm-run-all\":\"^4.0.2\",\"release-tool\":\"^0.2.2\",\"rimraf\":\"^2.6.1\",\"travis-multirunner\":\"^4.2.3\",\"watchify\":\"^3.9.0\",\"webrtc-adapter\":\"^6.4.8\"},\"homepage\":\"https://github.com/twilio/twilio-webrtc.js#readme\",\"keywords\":[\"shim\",\"twilio\",\"video\",\"webrtc\"],\"license\":\"BSD-3-Clause\",\"main\":\"./lib/index.js\",\"name\":\"@twilio/webrtc\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/twilio/twilio-webrtc.js.git\"},\"scripts\":{\"build\":\"npm-run-all clean lint test\",\"clean\":\"rimraf coverage\",\"lint\":\"eslint ./lib\",\"test\":\"npm-run-all test:*\",\"test:integration\":\"npm-run-all test:integration:*\",\"test:integration:adapter\":\"karma start karma/integration.adapter.conf.js\",\"test:integration:native\":\"karma start karma/integration.conf.js\",\"test:unit\":\"istanbul cover node_modules/mocha/bin/_mocha -- ./test/unit/index.js\"},\"version\":\"4.1.3\"}");
+module.exports = JSON.parse("{\"_from\":\"@twilio/webrtc@4.3.2\",\"_id\":\"@twilio/webrtc@4.3.2\",\"_inBundle\":false,\"_integrity\":\"sha512-3gIq7XDI3vBoikRBchCnocFmlRQt45KC7v0DKkat+TV6WBXYJx+Hub22PR18PAROkwl5dAmIziByjYWWVhCHgA==\",\"_location\":\"/@twilio/webrtc\",\"_phantomChildren\":{},\"_requested\":{\"type\":\"version\",\"registry\":true,\"raw\":\"@twilio/webrtc@4.3.2\",\"name\":\"@twilio/webrtc\",\"escapedName\":\"@twilio%2fwebrtc\",\"scope\":\"@twilio\",\"rawSpec\":\"4.3.2\",\"saveSpec\":null,\"fetchSpec\":\"4.3.2\"},\"_requiredBy\":[\"/twilio-video\"],\"_resolved\":\"https://registry.npmjs.org/@twilio/webrtc/-/webrtc-4.3.2.tgz\",\"_shasum\":\"919520a870fdf8d87f915da47276710828e8fc5b\",\"_spec\":\"@twilio/webrtc@4.3.2\",\"_where\":\"/Users/mbattle/Sites/laravel-video-conference-app/node_modules/twilio-video\",\"author\":{\"name\":\"Manjesh Malavalli\",\"email\":\"mmalavalli@twilio.com\"},\"bugs\":{\"url\":\"https://github.com/twilio/twilio-webrtc.js/issues\"},\"bundleDependencies\":false,\"contributors\":[{\"name\":\"Mark Roberts\",\"email\":\"mroberts@twilio.com\"},{\"name\":\"Ryan Rowland\",\"email\":\"rrowland@twilio.com\"},{\"name\":\"Makarand Patwardhan\",\"email\":\"mpatwardhan@twilio.com\"}],\"deprecated\":false,\"description\":\"WebRTC-related APIs and shims used by twilio-video.js\",\"devDependencies\":{\"browserify\":\"^14.4.0\",\"electron\":\"^5.0.0\",\"envify\":\"^4.1.0\",\"eslint\":\"^4.4.1\",\"is-docker\":\"^2.0.0\",\"istanbul\":\"^0.4.5\",\"karma\":\"^1.7.0\",\"karma-browserify\":\"^5.1.1\",\"karma-chrome-launcher\":\"^2.2.0\",\"karma-edgium-launcher\":\"^4.0.0-0\",\"karma-electron\":\"^6.1.0\",\"karma-firefox-launcher\":\"^1.0.1\",\"karma-htmlfile-reporter\":\"^0.3.8\",\"karma-junit-reporter\":\"^1.2.0\",\"karma-mocha\":\"^1.3.0\",\"karma-safari-launcher\":\"~0.1\",\"karma-spec-reporter\":\"0.0.31\",\"mocha\":\"^3.5.0\",\"npm-run-all\":\"^4.0.2\",\"rimraf\":\"^2.6.1\",\"simple-git\":\"^2.4.0\",\"twilio-release-tool\":\"^1.0.0\",\"watchify\":\"^3.9.0\",\"webrtc-adapter\":\"^6.4.8\"},\"homepage\":\"https://github.com/twilio/twilio-webrtc.js#readme\",\"keywords\":[\"shim\",\"twilio\",\"video\",\"webrtc\"],\"license\":\"BSD-3-Clause\",\"main\":\"./lib/index.js\",\"name\":\"@twilio/webrtc\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/twilio/twilio-webrtc.js.git\"},\"scripts\":{\"build\":\"npm-run-all clean lint test\",\"clean\":\"rimraf coverage\",\"lint\":\"eslint ./lib\",\"test\":\"npm-run-all test:*\",\"test:integration\":\"npm-run-all test:integration:*\",\"test:integration:adapter\":\"karma start karma/integration.adapter.conf.js\",\"test:integration:native\":\"karma start karma/integration.conf.js\",\"test:unit\":\"istanbul cover node_modules/mocha/bin/_mocha -- ./test/unit/index.js\"},\"version\":\"4.3.2\"}");
 
 /***/ }),
 
@@ -5227,6 +5297,507 @@ __webpack_require__.r(__webpack_exports__);
     this.getAccessToken();
   }
 });
+
+/***/ }),
+
+/***/ "./node_modules/backoff/index.js":
+/*!***************************************!*\
+  !*** ./node_modules/backoff/index.js ***!
+  \***************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+//      Copyright (c) 2012 Mathieu Turcotte
+//      Licensed under the MIT license.
+
+var Backoff = __webpack_require__(/*! ./lib/backoff */ "./node_modules/backoff/lib/backoff.js");
+var ExponentialBackoffStrategy = __webpack_require__(/*! ./lib/strategy/exponential */ "./node_modules/backoff/lib/strategy/exponential.js");
+var FibonacciBackoffStrategy = __webpack_require__(/*! ./lib/strategy/fibonacci */ "./node_modules/backoff/lib/strategy/fibonacci.js");
+var FunctionCall = __webpack_require__(/*! ./lib/function_call.js */ "./node_modules/backoff/lib/function_call.js");
+
+module.exports.Backoff = Backoff;
+module.exports.FunctionCall = FunctionCall;
+module.exports.FibonacciStrategy = FibonacciBackoffStrategy;
+module.exports.ExponentialStrategy = ExponentialBackoffStrategy;
+
+// Constructs a Fibonacci backoff.
+module.exports.fibonacci = function(options) {
+    return new Backoff(new FibonacciBackoffStrategy(options));
+};
+
+// Constructs an exponential backoff.
+module.exports.exponential = function(options) {
+    return new Backoff(new ExponentialBackoffStrategy(options));
+};
+
+// Constructs a FunctionCall for the given function and arguments.
+module.exports.call = function(fn, vargs, callback) {
+    var args = Array.prototype.slice.call(arguments);
+    fn = args[0];
+    vargs = args.slice(1, args.length - 1);
+    callback = args[args.length - 1];
+    return new FunctionCall(fn, vargs, callback);
+};
+
+
+/***/ }),
+
+/***/ "./node_modules/backoff/lib/backoff.js":
+/*!*********************************************!*\
+  !*** ./node_modules/backoff/lib/backoff.js ***!
+  \*********************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+//      Copyright (c) 2012 Mathieu Turcotte
+//      Licensed under the MIT license.
+
+var events = __webpack_require__(/*! events */ "./node_modules/events/events.js");
+var precond = __webpack_require__(/*! precond */ "./node_modules/precond/index.js");
+var util = __webpack_require__(/*! util */ "./node_modules/util/util.js");
+
+// A class to hold the state of a backoff operation. Accepts a backoff strategy
+// to generate the backoff delays.
+function Backoff(backoffStrategy) {
+    events.EventEmitter.call(this);
+
+    this.backoffStrategy_ = backoffStrategy;
+    this.maxNumberOfRetry_ = -1;
+    this.backoffNumber_ = 0;
+    this.backoffDelay_ = 0;
+    this.timeoutID_ = -1;
+
+    this.handlers = {
+        backoff: this.onBackoff_.bind(this)
+    };
+}
+util.inherits(Backoff, events.EventEmitter);
+
+// Sets a limit, greater than 0, on the maximum number of backoffs. A 'fail'
+// event will be emitted when the limit is reached.
+Backoff.prototype.failAfter = function(maxNumberOfRetry) {
+    precond.checkArgument(maxNumberOfRetry > 0,
+        'Expected a maximum number of retry greater than 0 but got %s.',
+        maxNumberOfRetry);
+
+    this.maxNumberOfRetry_ = maxNumberOfRetry;
+};
+
+// Starts a backoff operation. Accepts an optional parameter to let the
+// listeners know why the backoff operation was started.
+Backoff.prototype.backoff = function(err) {
+    precond.checkState(this.timeoutID_ === -1, 'Backoff in progress.');
+
+    if (this.backoffNumber_ === this.maxNumberOfRetry_) {
+        this.emit('fail', err);
+        this.reset();
+    } else {
+        this.backoffDelay_ = this.backoffStrategy_.next();
+        this.timeoutID_ = setTimeout(this.handlers.backoff, this.backoffDelay_);
+        this.emit('backoff', this.backoffNumber_, this.backoffDelay_, err);
+    }
+};
+
+// Handles the backoff timeout completion.
+Backoff.prototype.onBackoff_ = function() {
+    this.timeoutID_ = -1;
+    this.emit('ready', this.backoffNumber_, this.backoffDelay_);
+    this.backoffNumber_++;
+};
+
+// Stops any backoff operation and resets the backoff delay to its inital value.
+Backoff.prototype.reset = function() {
+    this.backoffNumber_ = 0;
+    this.backoffStrategy_.reset();
+    clearTimeout(this.timeoutID_);
+    this.timeoutID_ = -1;
+};
+
+module.exports = Backoff;
+
+
+/***/ }),
+
+/***/ "./node_modules/backoff/lib/function_call.js":
+/*!***************************************************!*\
+  !*** ./node_modules/backoff/lib/function_call.js ***!
+  \***************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+//      Copyright (c) 2012 Mathieu Turcotte
+//      Licensed under the MIT license.
+
+var events = __webpack_require__(/*! events */ "./node_modules/events/events.js");
+var precond = __webpack_require__(/*! precond */ "./node_modules/precond/index.js");
+var util = __webpack_require__(/*! util */ "./node_modules/util/util.js");
+
+var Backoff = __webpack_require__(/*! ./backoff */ "./node_modules/backoff/lib/backoff.js");
+var FibonacciBackoffStrategy = __webpack_require__(/*! ./strategy/fibonacci */ "./node_modules/backoff/lib/strategy/fibonacci.js");
+
+// Wraps a function to be called in a backoff loop.
+function FunctionCall(fn, args, callback) {
+    events.EventEmitter.call(this);
+
+    precond.checkIsFunction(fn, 'Expected fn to be a function.');
+    precond.checkIsArray(args, 'Expected args to be an array.');
+    precond.checkIsFunction(callback, 'Expected callback to be a function.');
+
+    this.function_ = fn;
+    this.arguments_ = args;
+    this.callback_ = callback;
+    this.lastResult_ = [];
+    this.numRetries_ = 0;
+
+    this.backoff_ = null;
+    this.strategy_ = null;
+    this.failAfter_ = -1;
+    this.retryPredicate_ = FunctionCall.DEFAULT_RETRY_PREDICATE_;
+
+    this.state_ = FunctionCall.State_.PENDING;
+}
+util.inherits(FunctionCall, events.EventEmitter);
+
+// States in which the call can be.
+FunctionCall.State_ = {
+    // Call isn't started yet.
+    PENDING: 0,
+    // Call is in progress.
+    RUNNING: 1,
+    // Call completed successfully which means that either the wrapped function
+    // returned successfully or the maximal number of backoffs was reached.
+    COMPLETED: 2,
+    // The call was aborted.
+    ABORTED: 3
+};
+
+// The default retry predicate which considers any error as retriable.
+FunctionCall.DEFAULT_RETRY_PREDICATE_ = function(err) {
+  return true;
+};
+
+// Checks whether the call is pending.
+FunctionCall.prototype.isPending = function() {
+    return this.state_ == FunctionCall.State_.PENDING;
+};
+
+// Checks whether the call is in progress.
+FunctionCall.prototype.isRunning = function() {
+    return this.state_ == FunctionCall.State_.RUNNING;
+};
+
+// Checks whether the call is completed.
+FunctionCall.prototype.isCompleted = function() {
+    return this.state_ == FunctionCall.State_.COMPLETED;
+};
+
+// Checks whether the call is aborted.
+FunctionCall.prototype.isAborted = function() {
+    return this.state_ == FunctionCall.State_.ABORTED;
+};
+
+// Sets the backoff strategy to use. Can only be called before the call is
+// started otherwise an exception will be thrown.
+FunctionCall.prototype.setStrategy = function(strategy) {
+    precond.checkState(this.isPending(), 'FunctionCall in progress.');
+    this.strategy_ = strategy;
+    return this; // Return this for chaining.
+};
+
+// Sets the predicate which will be used to determine whether the errors
+// returned from the wrapped function should be retried or not, e.g. a
+// network error would be retriable while a type error would stop the
+// function call.
+FunctionCall.prototype.retryIf = function(retryPredicate) {
+    precond.checkState(this.isPending(), 'FunctionCall in progress.');
+    this.retryPredicate_ = retryPredicate;
+    return this;
+};
+
+// Returns all intermediary results returned by the wrapped function since
+// the initial call.
+FunctionCall.prototype.getLastResult = function() {
+    return this.lastResult_.concat();
+};
+
+// Returns the number of times the wrapped function call was retried.
+FunctionCall.prototype.getNumRetries = function() {
+    return this.numRetries_;
+};
+
+// Sets the backoff limit.
+FunctionCall.prototype.failAfter = function(maxNumberOfRetry) {
+    precond.checkState(this.isPending(), 'FunctionCall in progress.');
+    this.failAfter_ = maxNumberOfRetry;
+    return this; // Return this for chaining.
+};
+
+// Aborts the call.
+FunctionCall.prototype.abort = function() {
+    if (this.isCompleted() || this.isAborted()) {
+      return;
+    }
+
+    if (this.isRunning()) {
+        this.backoff_.reset();
+    }
+
+    this.state_ = FunctionCall.State_.ABORTED;
+    this.lastResult_ = [new Error('Backoff aborted.')];
+    this.emit('abort');
+    this.doCallback_();
+};
+
+// Initiates the call to the wrapped function. Accepts an optional factory
+// function used to create the backoff instance; used when testing.
+FunctionCall.prototype.start = function(backoffFactory) {
+    precond.checkState(!this.isAborted(), 'FunctionCall is aborted.');
+    precond.checkState(this.isPending(), 'FunctionCall already started.');
+
+    var strategy = this.strategy_ || new FibonacciBackoffStrategy();
+
+    this.backoff_ = backoffFactory ?
+        backoffFactory(strategy) :
+        new Backoff(strategy);
+
+    this.backoff_.on('ready', this.doCall_.bind(this, true /* isRetry */));
+    this.backoff_.on('fail', this.doCallback_.bind(this));
+    this.backoff_.on('backoff', this.handleBackoff_.bind(this));
+
+    if (this.failAfter_ > 0) {
+        this.backoff_.failAfter(this.failAfter_);
+    }
+
+    this.state_ = FunctionCall.State_.RUNNING;
+    this.doCall_(false /* isRetry */);
+};
+
+// Calls the wrapped function.
+FunctionCall.prototype.doCall_ = function(isRetry) {
+    if (isRetry) {
+        this.numRetries_++;
+    }
+    var eventArgs = ['call'].concat(this.arguments_);
+    events.EventEmitter.prototype.emit.apply(this, eventArgs);
+    var callback = this.handleFunctionCallback_.bind(this);
+    this.function_.apply(null, this.arguments_.concat(callback));
+};
+
+// Calls the wrapped function's callback with the last result returned by the
+// wrapped function.
+FunctionCall.prototype.doCallback_ = function() {
+    this.callback_.apply(null, this.lastResult_);
+};
+
+// Handles wrapped function's completion. This method acts as a replacement
+// for the original callback function.
+FunctionCall.prototype.handleFunctionCallback_ = function() {
+    if (this.isAborted()) {
+        return;
+    }
+
+    var args = Array.prototype.slice.call(arguments);
+    this.lastResult_ = args; // Save last callback arguments.
+    events.EventEmitter.prototype.emit.apply(this, ['callback'].concat(args));
+
+    var err = args[0];
+    if (err && this.retryPredicate_(err)) {
+        this.backoff_.backoff(err);
+    } else {
+        this.state_ = FunctionCall.State_.COMPLETED;
+        this.doCallback_();
+    }
+};
+
+// Handles the backoff event by reemitting it.
+FunctionCall.prototype.handleBackoff_ = function(number, delay, err) {
+    this.emit('backoff', number, delay, err);
+};
+
+module.exports = FunctionCall;
+
+
+/***/ }),
+
+/***/ "./node_modules/backoff/lib/strategy/exponential.js":
+/*!**********************************************************!*\
+  !*** ./node_modules/backoff/lib/strategy/exponential.js ***!
+  \**********************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+//      Copyright (c) 2012 Mathieu Turcotte
+//      Licensed under the MIT license.
+
+var util = __webpack_require__(/*! util */ "./node_modules/util/util.js");
+var precond = __webpack_require__(/*! precond */ "./node_modules/precond/index.js");
+
+var BackoffStrategy = __webpack_require__(/*! ./strategy */ "./node_modules/backoff/lib/strategy/strategy.js");
+
+// Exponential backoff strategy.
+function ExponentialBackoffStrategy(options) {
+    BackoffStrategy.call(this, options);
+    this.backoffDelay_ = 0;
+    this.nextBackoffDelay_ = this.getInitialDelay();
+    this.factor_ = ExponentialBackoffStrategy.DEFAULT_FACTOR;
+
+    if (options && options.factor !== undefined) {
+        precond.checkArgument(options.factor > 1,
+            'Exponential factor should be greater than 1 but got %s.',
+            options.factor);
+        this.factor_ = options.factor;
+    }
+}
+util.inherits(ExponentialBackoffStrategy, BackoffStrategy);
+
+// Default multiplication factor used to compute the next backoff delay from
+// the current one. The value can be overridden by passing a custom factor as
+// part of the options.
+ExponentialBackoffStrategy.DEFAULT_FACTOR = 2;
+
+ExponentialBackoffStrategy.prototype.next_ = function() {
+    this.backoffDelay_ = Math.min(this.nextBackoffDelay_, this.getMaxDelay());
+    this.nextBackoffDelay_ = this.backoffDelay_ * this.factor_;
+    return this.backoffDelay_;
+};
+
+ExponentialBackoffStrategy.prototype.reset_ = function() {
+    this.backoffDelay_ = 0;
+    this.nextBackoffDelay_ = this.getInitialDelay();
+};
+
+module.exports = ExponentialBackoffStrategy;
+
+
+/***/ }),
+
+/***/ "./node_modules/backoff/lib/strategy/fibonacci.js":
+/*!********************************************************!*\
+  !*** ./node_modules/backoff/lib/strategy/fibonacci.js ***!
+  \********************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+//      Copyright (c) 2012 Mathieu Turcotte
+//      Licensed under the MIT license.
+
+var util = __webpack_require__(/*! util */ "./node_modules/util/util.js");
+
+var BackoffStrategy = __webpack_require__(/*! ./strategy */ "./node_modules/backoff/lib/strategy/strategy.js");
+
+// Fibonacci backoff strategy.
+function FibonacciBackoffStrategy(options) {
+    BackoffStrategy.call(this, options);
+    this.backoffDelay_ = 0;
+    this.nextBackoffDelay_ = this.getInitialDelay();
+}
+util.inherits(FibonacciBackoffStrategy, BackoffStrategy);
+
+FibonacciBackoffStrategy.prototype.next_ = function() {
+    var backoffDelay = Math.min(this.nextBackoffDelay_, this.getMaxDelay());
+    this.nextBackoffDelay_ += this.backoffDelay_;
+    this.backoffDelay_ = backoffDelay;
+    return backoffDelay;
+};
+
+FibonacciBackoffStrategy.prototype.reset_ = function() {
+    this.nextBackoffDelay_ = this.getInitialDelay();
+    this.backoffDelay_ = 0;
+};
+
+module.exports = FibonacciBackoffStrategy;
+
+
+/***/ }),
+
+/***/ "./node_modules/backoff/lib/strategy/strategy.js":
+/*!*******************************************************!*\
+  !*** ./node_modules/backoff/lib/strategy/strategy.js ***!
+  \*******************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+//      Copyright (c) 2012 Mathieu Turcotte
+//      Licensed under the MIT license.
+
+var events = __webpack_require__(/*! events */ "./node_modules/events/events.js");
+var util = __webpack_require__(/*! util */ "./node_modules/util/util.js");
+
+function isDef(value) {
+    return value !== undefined && value !== null;
+}
+
+// Abstract class defining the skeleton for the backoff strategies. Accepts an
+// object holding the options for the backoff strategy:
+//
+//  * `randomisationFactor`: The randomisation factor which must be between 0
+//     and 1 where 1 equates to a randomization factor of 100% and 0 to no
+//     randomization.
+//  * `initialDelay`: The backoff initial delay in milliseconds.
+//  * `maxDelay`: The backoff maximal delay in milliseconds.
+function BackoffStrategy(options) {
+    options = options || {};
+
+    if (isDef(options.initialDelay) && options.initialDelay < 1) {
+        throw new Error('The initial timeout must be greater than 0.');
+    } else if (isDef(options.maxDelay) && options.maxDelay < 1) {
+        throw new Error('The maximal timeout must be greater than 0.');
+    }
+
+    this.initialDelay_ = options.initialDelay || 100;
+    this.maxDelay_ = options.maxDelay || 10000;
+
+    if (this.maxDelay_ <= this.initialDelay_) {
+        throw new Error('The maximal backoff delay must be ' +
+                        'greater than the initial backoff delay.');
+    }
+
+    if (isDef(options.randomisationFactor) &&
+        (options.randomisationFactor < 0 || options.randomisationFactor > 1)) {
+        throw new Error('The randomisation factor must be between 0 and 1.');
+    }
+
+    this.randomisationFactor_ = options.randomisationFactor || 0;
+}
+
+// Gets the maximal backoff delay.
+BackoffStrategy.prototype.getMaxDelay = function() {
+    return this.maxDelay_;
+};
+
+// Gets the initial backoff delay.
+BackoffStrategy.prototype.getInitialDelay = function() {
+    return this.initialDelay_;
+};
+
+// Template method that computes and returns the next backoff delay in
+// milliseconds.
+BackoffStrategy.prototype.next = function() {
+    var backoffDelay = this.next_();
+    var randomisationMultiple = 1 + Math.random() * this.randomisationFactor_;
+    var randomizedDelay = Math.round(backoffDelay * randomisationMultiple);
+    return randomizedDelay;
+};
+
+// Computes and returns the next backoff delay. Intended to be overridden by
+// subclasses.
+BackoffStrategy.prototype.next_ = function() {
+    throw new Error('BackoffStrategy.next_() unimplemented.');
+};
+
+// Template method that resets the backoff delay to its initial value.
+BackoffStrategy.prototype.reset = function() {
+    this.reset_();
+};
+
+// Resets the backoff delay to its initial value. Intended to be overridden by
+// subclasses.
+BackoffStrategy.prototype.reset_ = function() {
+    throw new Error('BackoffStrategy.reset_() unimplemented.');
+};
+
+module.exports = BackoffStrategy;
+
 
 /***/ }),
 
@@ -40898,6 +41469,162 @@ Popper.Defaults = Defaults;
 
 /***/ }),
 
+/***/ "./node_modules/precond/index.js":
+/*!***************************************!*\
+  !*** ./node_modules/precond/index.js ***!
+  \***************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+/*
+ * Copyright (c) 2012 Mathieu Turcotte
+ * Licensed under the MIT license.
+ */
+
+module.exports = __webpack_require__(/*! ./lib/checks */ "./node_modules/precond/lib/checks.js");
+
+/***/ }),
+
+/***/ "./node_modules/precond/lib/checks.js":
+/*!********************************************!*\
+  !*** ./node_modules/precond/lib/checks.js ***!
+  \********************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+/*
+ * Copyright (c) 2012 Mathieu Turcotte
+ * Licensed under the MIT license.
+ */
+
+var util = __webpack_require__(/*! util */ "./node_modules/util/util.js");
+
+var errors = module.exports = __webpack_require__(/*! ./errors */ "./node_modules/precond/lib/errors.js");
+
+function failCheck(ExceptionConstructor, callee, messageFormat, formatArgs) {
+    messageFormat = messageFormat || '';
+    var message = util.format.apply(this, [messageFormat].concat(formatArgs));
+    var error = new ExceptionConstructor(message);
+    Error.captureStackTrace(error, callee);
+    throw error;
+}
+
+function failArgumentCheck(callee, message, formatArgs) {
+    failCheck(errors.IllegalArgumentError, callee, message, formatArgs);
+}
+
+function failStateCheck(callee, message, formatArgs) {
+    failCheck(errors.IllegalStateError, callee, message, formatArgs);
+}
+
+module.exports.checkArgument = function(value, message) {
+    if (!value) {
+        failArgumentCheck(arguments.callee, message,
+            Array.prototype.slice.call(arguments, 2));
+    }
+};
+
+module.exports.checkState = function(value, message) {
+    if (!value) {
+        failStateCheck(arguments.callee, message,
+            Array.prototype.slice.call(arguments, 2));
+    }
+};
+
+module.exports.checkIsDef = function(value, message) {
+    if (value !== undefined) {
+        return value;
+    }
+
+    failArgumentCheck(arguments.callee, message ||
+        'Expected value to be defined but was undefined.',
+        Array.prototype.slice.call(arguments, 2));
+};
+
+module.exports.checkIsDefAndNotNull = function(value, message) {
+    // Note that undefined == null.
+    if (value != null) {
+        return value;
+    }
+
+    failArgumentCheck(arguments.callee, message ||
+        'Expected value to be defined and not null but got "' +
+        typeOf(value) + '".', Array.prototype.slice.call(arguments, 2));
+};
+
+// Fixed version of the typeOf operator which returns 'null' for null values
+// and 'array' for arrays.
+function typeOf(value) {
+    var s = typeof value;
+    if (s == 'object') {
+        if (!value) {
+            return 'null';
+        } else if (value instanceof Array) {
+            return 'array';
+        }
+    }
+    return s;
+}
+
+function typeCheck(expect) {
+    return function(value, message) {
+        var type = typeOf(value);
+
+        if (type == expect) {
+            return value;
+        }
+
+        failArgumentCheck(arguments.callee, message ||
+            'Expected "' + expect + '" but got "' + type + '".',
+            Array.prototype.slice.call(arguments, 2));
+    };
+}
+
+module.exports.checkIsString = typeCheck('string');
+module.exports.checkIsArray = typeCheck('array');
+module.exports.checkIsNumber = typeCheck('number');
+module.exports.checkIsBoolean = typeCheck('boolean');
+module.exports.checkIsFunction = typeCheck('function');
+module.exports.checkIsObject = typeCheck('object');
+
+
+/***/ }),
+
+/***/ "./node_modules/precond/lib/errors.js":
+/*!********************************************!*\
+  !*** ./node_modules/precond/lib/errors.js ***!
+  \********************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+/*
+ * Copyright (c) 2012 Mathieu Turcotte
+ * Licensed under the MIT license.
+ */
+
+var util = __webpack_require__(/*! util */ "./node_modules/util/util.js");
+
+function IllegalArgumentError(message) {
+    Error.call(this, message);
+    this.message = message;
+}
+util.inherits(IllegalArgumentError, Error);
+
+IllegalArgumentError.prototype.name = 'IllegalArgumentError';
+
+function IllegalStateError(message) {
+    Error.call(this, message);
+    this.message = message;
+}
+util.inherits(IllegalStateError, Error);
+
+IllegalStateError.prototype.name = 'IllegalStateError';
+
+module.exports.IllegalStateError = IllegalStateError;
+module.exports.IllegalArgumentError = IllegalArgumentError;
+
+/***/ }),
+
 /***/ "./node_modules/process/browser.js":
 /*!*****************************************!*\
   !*** ./node_modules/process/browser.js ***!
@@ -41389,18 +42116,18 @@ var CancelablePromise = __webpack_require__(/*! ./util/cancelablepromise */ "./n
  */
 function createCancelableRoomPromise(getLocalTracks, createLocalParticipant, createRoomSignaling, createRoom) {
   var cancelableRoomSignalingPromise = void 0;
-  var cancelationError = new Error('Canceled');
+  var cancellationError = new Error('Canceled');
 
   return new CancelablePromise(function onCreate(resolve, reject, isCanceled) {
     var localParticipant = void 0;
     getLocalTracks(function getLocalTracksSucceeded(localTracks) {
       if (isCanceled()) {
-        return CancelablePromise.reject(cancelationError);
+        return CancelablePromise.reject(cancellationError);
       }
       localParticipant = createLocalParticipant(localTracks);
       return createRoomSignaling(localParticipant).then(function createRoomSignalingSucceeded(getCancelableRoomSignalingPromise) {
         if (isCanceled()) {
-          throw cancelationError;
+          throw cancellationError;
         }
         cancelableRoomSignalingPromise = getCancelableRoomSignalingPromise();
         return cancelableRoomSignalingPromise;
@@ -41408,7 +42135,7 @@ function createCancelableRoomPromise(getLocalTracks, createLocalParticipant, cre
     }).then(function roomSignalingConnected(roomSignaling) {
       if (isCanceled()) {
         roomSignaling.disconnect();
-        throw cancelationError;
+        throw cancellationError;
       }
       resolve(createRoom(localParticipant, roomSignaling));
     }).catch(function onError(error) {
@@ -41435,56 +42162,64 @@ module.exports = createCancelableRoomPromise;
 "use strict";
 
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
-
 var _require = __webpack_require__(/*! @twilio/webrtc */ "./node_modules/@twilio/webrtc/lib/index.js"),
     MediaStreamTrack = _require.MediaStreamTrack;
 
 var _require2 = __webpack_require__(/*! @twilio/webrtc/lib/util */ "./node_modules/@twilio/webrtc/lib/util/index.js"),
-    guessBrowser = _require2.guessBrowser;
+    guessBrowser = _require2.guessBrowser,
+    guessBrowserVersion = _require2.guessBrowserVersion;
 
 var createCancelableRoomPromise = __webpack_require__(/*! ./cancelableroompromise */ "./node_modules/twilio-video/es5/cancelableroompromise.js");
 var createLocalTracks = __webpack_require__(/*! ./createlocaltracks */ "./node_modules/twilio-video/es5/createlocaltracks.js");
 var EncodingParametersImpl = __webpack_require__(/*! ./encodingparameters */ "./node_modules/twilio-video/es5/encodingparameters.js");
-var ConstantIceServerSource = __webpack_require__(/*! ./iceserversource/constant */ "./node_modules/twilio-video/es5/iceserversource/constant.js");
-var NTSIceServerSource = __webpack_require__(/*! ./iceserversource/nts */ "./node_modules/twilio-video/es5/iceserversource/nts.js");
 var LocalParticipant = __webpack_require__(/*! ./localparticipant */ "./node_modules/twilio-video/es5/localparticipant.js");
-var LocalAudioTrack = __webpack_require__(/*! ./media/track/es5/localaudiotrack */ "./node_modules/twilio-video/es5/media/track/es5/localaudiotrack.js");
-var LocalDataTrack = __webpack_require__(/*! ./media/track/es5/localdatatrack */ "./node_modules/twilio-video/es5/media/track/es5/localdatatrack.js");
-var LocalVideoTrack = __webpack_require__(/*! ./media/track/es5/localvideotrack */ "./node_modules/twilio-video/es5/media/track/es5/localvideotrack.js");
+
+var _require3 = __webpack_require__(/*! ./media/track/es5 */ "./node_modules/twilio-video/es5/media/track/es5/index.js"),
+    LocalAudioTrack = _require3.LocalAudioTrack,
+    LocalDataTrack = _require3.LocalDataTrack,
+    LocalVideoTrack = _require3.LocalVideoTrack;
+
 var NetworkQualityConfigurationImpl = __webpack_require__(/*! ./networkqualityconfiguration */ "./node_modules/twilio-video/es5/networkqualityconfiguration.js");
 var Room = __webpack_require__(/*! ./room */ "./node_modules/twilio-video/es5/room.js");
 var SignalingV2 = __webpack_require__(/*! ./signaling/v2 */ "./node_modules/twilio-video/es5/signaling/v2/index.js");
 
-var _require3 = __webpack_require__(/*! ./util */ "./node_modules/twilio-video/es5/util/index.js"),
-    asLocalTrack = _require3.asLocalTrack,
-    buildLogLevels = _require3.buildLogLevels,
-    filterObject = _require3.filterObject,
-    isNonArrayObject = _require3.isNonArrayObject;
+var _require4 = __webpack_require__(/*! ./util */ "./node_modules/twilio-video/es5/util/index.js"),
+    asLocalTrack = _require4.asLocalTrack,
+    buildLogLevels = _require4.buildLogLevels,
+    filterObject = _require4.filterObject,
+    isNonArrayObject = _require4.isNonArrayObject;
 
-var _require4 = __webpack_require__(/*! ./util/constants */ "./node_modules/twilio-video/es5/util/constants.js"),
-    DEFAULT_ENVIRONMENT = _require4.DEFAULT_ENVIRONMENT,
-    DEFAULT_LOG_LEVEL = _require4.DEFAULT_LOG_LEVEL,
-    DEFAULT_REALM = _require4.DEFAULT_REALM,
-    DEFAULT_REGION = _require4.DEFAULT_REGION,
-    ICE_SERVERS_TIMEOUT_MS = _require4.ICE_SERVERS_TIMEOUT_MS,
-    WS_SERVER = _require4.WS_SERVER,
-    E = _require4.typeErrors;
+var _require5 = __webpack_require__(/*! ./util/constants */ "./node_modules/twilio-video/es5/util/constants.js"),
+    DEFAULT_ENVIRONMENT = _require5.DEFAULT_ENVIRONMENT,
+    DEFAULT_LOG_LEVEL = _require5.DEFAULT_LOG_LEVEL,
+    DEFAULT_LOGGER_NAME = _require5.DEFAULT_LOGGER_NAME,
+    DEFAULT_REALM = _require5.DEFAULT_REALM,
+    DEFAULT_REGION = _require5.DEFAULT_REGION,
+    WS_SERVER = _require5.WS_SERVER,
+    E = _require5.typeErrors;
 
 var CancelablePromise = __webpack_require__(/*! ./util/cancelablepromise */ "./node_modules/twilio-video/es5/util/cancelablepromise.js");
-var Log = __webpack_require__(/*! ./util/log */ "./node_modules/twilio-video/es5/util/log.js");
+var EventObserver = __webpack_require__(/*! ./util/eventobserver */ "./node_modules/twilio-video/es5/util/eventobserver.js");
+var DefaultLog = __webpack_require__(/*! ./util/log */ "./node_modules/twilio-video/es5/util/log.js");
 
-var _require5 = __webpack_require__(/*! ./util/validate */ "./node_modules/twilio-video/es5/util/validate.js"),
-    validateBandwidthProfile = _require5.validateBandwidthProfile;
+var _require6 = __webpack_require__(/*! ./util/validate */ "./node_modules/twilio-video/es5/util/validate.js"),
+    validateBandwidthProfile = _require6.validateBandwidthProfile;
+
+var safariVersion = guessBrowser() === 'safari' && guessBrowserVersion();
 
 // This is used to make out which connect() call a particular Log statement
 // belongs to. Each call to connect() increments this counter.
-
-
 var connectCalls = 0;
 
 var didPrintSafariWarning = false;
-var didPrintDscpTaggingWarning = false;
+var isSafariWithoutVP8Support = false;
+
+if (safariVersion) {
+  var safariMajorVersion = safariVersion.major,
+      safariMinorVersion = safariVersion.minor;
+
+  isSafariWithoutVP8Support = safariMajorVersion < 12 || safariMajorVersion === 12 && safariMinorVersion < 1;
+}
 
 /**
  * Connect to a {@link Room}.
@@ -41519,6 +42254,8 @@ var didPrintDscpTaggingWarning = false;
  *   room.once('disconnected', function() {
  *     console.log('You left the Room:', room.name);
  *   });
+ * }).catch(error => {
+ *   console.log('Could not connect to the Room:', error.message);
  * });
  * @example
  * var Video = require('twilio-video');
@@ -41536,6 +42273,8 @@ var didPrintDscpTaggingWarning = false;
  *   room.once('disconnected', function() {
  *     console.log('You left the Room:', room.name);
  *   });
+ * }).catch(error => {
+ *   console.log('Could not connect to the Room:', error.message);
  * });
  * @example
  * var Video = require('twilio-video');
@@ -41558,6 +42297,8 @@ var didPrintDscpTaggingWarning = false;
  *   room.once('disconnected', function() {
  *     console.log('You left the Room:', room.name);
  *   });
+ * }).catch(error => {
+ *   console.log('Could not connect to the Room:', error.message);
  * });
  * @example
  * var Video = require('twilio-video');
@@ -41572,6 +42313,37 @@ var didPrintDscpTaggingWarning = false;
  *   room.localParticipants.trackPublications.forEach(function(publication) {
  *     console.log('The LocalTrack "' + publication.trackName + '" was successfully published');
  *   });
+ * }).catch(error => {
+ *   console.log('Could not connect to the Room:', error.message);
+ * });
+ * @example
+ * // Accessing the SDK logger
+ * var { Logger, connect } = require('twilio-video');
+ * var token = getAccessToken();
+ *
+ * var logger = Logger.getLogger('twilio-video');
+ *
+ * // Listen for logs
+ * var originalFactory = logger.methodFactory;
+ * logger.methodFactory = function (methodName, logLevel, loggerName) {
+ *   var method = originalFactory(methodName, logLevel, loggerName);
+ *
+ *   return function (datetime, logLevel, component, message, data) {
+ *     method(datetime, logLevel, component, message, data);
+ *     // Send to your own server
+ *     postDataToServer(arguments);
+ *   };
+ * };
+ * logger.setLevel('debug');
+ *
+ * connect(token, {
+ *   name: 'my-cool-room'
+ * }).then(function(room) {
+ *   room.on('participantConnected', function(participant) {
+ *     console.log(participant.identity + ' has connected');
+ *   });
+ * }).catch(error => {
+ *   console.log('Could not connect to the Room:', error.message);
  * });
  */
 function connect(token, options) {
@@ -41582,23 +42354,31 @@ function connect(token, options) {
     return CancelablePromise.reject(E.INVALID_TYPE('options', 'object'));
   }
 
-  var shouldPrintDscpTaggingWarning = false;
-  if ('dscpTagging' in options) {
-    options = Object.assign({
-      enableDscp: options.dscpTagging
-    }, options);
-    delete options.dscpTagging;
-    shouldPrintDscpTaggingWarning = !didPrintDscpTaggingWarning;
+  var Log = options.Log || DefaultLog;
+  var loggerName = options.loggerName || DEFAULT_LOGGER_NAME;
+  var logLevel = options.logLevel || DEFAULT_LOG_LEVEL;
+  var logLevels = buildLogLevels(logLevel);
+  var logComponentName = '[connect #' + ++connectCalls + ']';
+
+  var log = void 0;
+  try {
+    log = new Log('default', logComponentName, logLevels, loggerName);
+  } catch (error) {
+    return CancelablePromise.reject(error);
   }
 
+  // NOTE(csantos): Log a warning for the deprecated ConnectOptions properties.
+  // The warning is displayed only for the first call to connect() per browser session.
+  // Additionally, the options that are no longer needed will be removed.
+  deprecateOptions(options, log);
+
   options = Object.assign({
-    abortOnIceServersTimeout: false,
     automaticSubscription: true,
     createLocalTracks: createLocalTracks,
     dominantSpeaker: false,
     enableDscp: false,
     environment: DEFAULT_ENVIRONMENT,
-    iceServersTimeout: ICE_SERVERS_TIMEOUT_MS,
+    eventListener: null,
     insights: true,
     LocalAudioTrack: LocalAudioTrack,
     LocalDataTrack: LocalDataTrack,
@@ -41606,10 +42386,12 @@ function connect(token, options) {
     LocalVideoTrack: LocalVideoTrack,
     Log: Log,
     MediaStreamTrack: MediaStreamTrack,
-    logLevel: DEFAULT_LOG_LEVEL,
+    loggerName: loggerName,
+    logLevel: logLevel,
     maxAudioBitrate: null,
     maxVideoBitrate: null,
     name: null,
+    networkMonitor: true,
     networkQuality: false,
     preferredAudioCodecs: [],
     preferredVideoCodecs: [],
@@ -41620,32 +42402,17 @@ function connect(token, options) {
 
   /* eslint new-cap:0 */
   var wsServer = WS_SERVER(options.environment, options.region);
+  var eventObserver = new EventObserver(Date.now(), log, options.eventListener);
+  options = Object.assign({ eventObserver: eventObserver, wsServer: wsServer }, options);
 
-  options = Object.assign({ wsServer: wsServer }, options);
-
-  var logLevels = buildLogLevels(options.logLevel);
-  var logComponentName = '[connect #' + ++connectCalls + ']';
-
-  var log = void 0;
-  try {
-    log = new options.Log('default', logComponentName, logLevels);
-  } catch (error) {
-    return CancelablePromise.reject(error);
-  }
   options.log = log;
-
-  // NOTE(mmalavalli): Print the "dscpTagging" deprecation warning once if the log-level
-  // is at least "warn", i.e. neither "error" nor "off".
-  if (shouldPrintDscpTaggingWarning && log.level !== 'error' && log.level !== 'off') {
-    didPrintDscpTaggingWarning = true;
-    log.warn(['The ConnectOptions flag "dscpTagging" is deprecated and scheduled for removal.', 'Please use "enableDscp" instead.'].join(' '));
-  }
 
   // NOTE(mroberts): Print the Safari warning once if the log-level is at least
   // "warn", i.e. neither "error" nor "off".
-  if (guessBrowser() === 'safari' && !didPrintSafariWarning && log.logLevel !== 'error' && log.logLevel !== 'off') {
+  // NOTE(mmalavalli): Print the Safari warning only for versions 12.0 and below.
+  if (isSafariWithoutVP8Support && !didPrintSafariWarning && log.logLevel !== 'error' && log.logLevel !== 'off') {
     didPrintSafariWarning = true;
-    log.warn(['This release of twilio-video.js includes experimental support for', 'Safari 11 and newer. Support for Safari is "experimental" because,', 'at the time of writing, Safari does not support VP8. This means you', 'may experience codec issues in Group Rooms. You may also experience', 'codec issues in Peer-to-Peer (P2P) Rooms containing Android- or', 'iOS-based Participants who do not support H.264. However, P2P Rooms', 'with browser-based Participants should work. Please test this release', 'and report any issues to https://github.com/twilio/twilio-video.js'].join(' '));
+    log.warn(['Support for Safari 12.0 and below is limited because it does not support VP8.', 'This means you may experience codec issues in Group Rooms. You may also', 'experience codec issues in Peer-to-Peer (P2P) Rooms containing Android- or', 'iOS-based Participants who do not support H.264. However, P2P Rooms', 'with browser-based Participants should work. For more information, please', 'refer to this guide: https://www.twilio.com/docs/video/javascript-v2-developing-safari-11'].join(' '));
   }
 
   if (typeof token !== 'string') {
@@ -41687,29 +42454,19 @@ function connect(token, options) {
     maxVideoBitrate: options.maxVideoBitrate
   });
 
-  var ntsIceServerSourceOptions = Object.assign({}, options, {
-    abortOnTimeout: options.abortOnIceServersTimeout,
-    timeout: options.iceServersTimeout
-  });
-
-  var iceServerSource = Array.isArray(options.iceServers) ? new ConstantIceServerSource(options.iceServers) : _typeof(options.iceServers) === 'object' ? options.iceServers : new NTSIceServerSource(token, ntsIceServerSourceOptions);
-
   var preferredCodecs = {
-    audio: options.preferredAudioCodecs,
-    video: options.preferredVideoCodecs.map(normalizeVideoCodecSettings)
+    audio: options.preferredAudioCodecs.map(normalizeCodecSettings),
+    video: options.preferredVideoCodecs.map(normalizeCodecSettings)
   };
 
   var networkQualityConfiguration = new NetworkQualityConfigurationImpl(isNonArrayObject(options.networkQuality) ? options.networkQuality : {});
-
-  // Convert options.networkQuality to boolean to configure Media Signaling
-  options.networkQuality = isNonArrayObject(options.networkQuality) || options.networkQuality;
 
   // Create a CancelableRoomPromise<Room> that resolves after these steps:
   // 1 - Get the LocalTracks.
   // 2 - Create the LocalParticipant using options.tracks.
   // 3 - Connect to rtc-room-service and create the RoomSignaling.
   // 4 - Create the Room and then resolve the CancelablePromise.
-  var cancelableRoomPromise = createCancelableRoomPromise(getLocalTracks.bind(null, options), createLocalParticipant.bind(null, signaling, log, encodingParameters, networkQualityConfiguration, options), createRoomSignaling.bind(null, token, options, signaling, iceServerSource, encodingParameters, preferredCodecs), createRoom.bind(null, options));
+  var cancelableRoomPromise = createCancelableRoomPromise(getLocalTracks.bind(null, options), createLocalParticipant.bind(null, signaling, log, encodingParameters, networkQualityConfiguration, options), createRoomSignaling.bind(null, token, options, signaling, encodingParameters, preferredCodecs), createRoom.bind(null, options));
 
   cancelableRoomPromise.then(function (room) {
     log.info('Connected to Room:', room.toString());
@@ -41717,9 +42474,6 @@ function connect(token, options) {
     log.debug('Room:', room);
     return room;
   }, function (error) {
-    if (iceServerSource.isStarted) {
-      iceServerSource.stop();
-    }
     if (cancelableRoomPromise._isCanceled) {
       log.info('Attempt to connect to a Room was canceled');
     } else {
@@ -41734,12 +42488,6 @@ function connect(token, options) {
  * You may pass these options to {@link connect} in order to override the
  * default behavior.
  * @typedef {object} ConnectOptions
- * @property {boolean} [abortOnIceServersTimeout=false] - If fetching ICE
- *   servers times out (for example, due to a restrictive network or slow HTTP
- *   proxy), then, by default, twilio-video.js will fallback to using hard-coded
- *   STUN servers and continue connecting to the Room. Setting this property to
- *   <code>true</code> will cause twilio-video.js to abort instead, and
- *   {@link connect} will reject with a {@link ConfigurationAcquireFailedError}.
  * @property {boolean|CreateLocalTrackOptions} [audio=true] - Whether or not to
  *   get local audio with <code>getUserMedia</code> when <code>tracks</code>
  *   are not provided.
@@ -41769,10 +42517,12 @@ function connect(token, options) {
  *   sent with DSCP header value set to 0xb8 which corresponds to Expedited Forwarding (EF).
  *   Video packets will be sent with DSCP header value set to 0x88 which corresponds to
  *   Assured Forwarding (AF41).
+ * @property {EventListener} [eventListener] - <code>(deprecated: use [Video.Logger](module-twilio-video.html)</code>
+ *   you can listen to fine-grained events related to signaling and media that are
+ *   not available in the public APIs. These events might be useful for your own reporting
+ *   and diagnostics.
  * @property {Array<RTCIceServer>} iceServers - Override the STUN and TURN
  *   servers used when connecting to {@link Room}s
- * @property {number} [iceServersTimeout=3000] - Override the amount of time, in
- *   milliseconds, that the SDK will wait when acquiring STUN and TURN servers
  * @property {RTCIceTransportPolicy} [iceTransportPolicy="all"] - Override the
  *   ICE transport policy to be one of "relay" or "all"
  * @property {boolean} [insights=true] - Whether publishing events
@@ -41802,7 +42552,7 @@ function connect(token, options) {
  *   than <code style="padding:0 0">gll</code> bypasses routing and guarantees that signaling traffic will be
  *   terminated in the region that you prefer. Please refer to this <a href="https://www.twilio.com/docs/video/ip-address-whitelisting#signaling-communication" target="_blank">table</a>
  *   for the list of supported signaling regions.
- * @property {Array<AudioCodec>} [preferredAudioCodecs=[]] - Preferred audio codecs;
+ * @property {Array<AudioCodec|AudioCodecSettings>} [preferredAudioCodecs=[]] - Preferred audio codecs;
  *  An empty array preserves the current audio codec preference order.
  * @property {Array<VideoCodec|VideoCodecSettings>} [preferredVideoCodecs=[]] -
  *  Preferred video codecs; An empty array preserves the current video codec
@@ -41811,10 +42561,14 @@ function connect(token, options) {
  *  <code>VideoCodecs</code> property.
  *  See <a href="https://www.twilio.com/docs/api/video/rooms-resource#create-room">
  *  here</a> for more information.
- * @property {LogLevel|LogLevels} [logLevel='warn'] - Set the log verbosity
- *   of logging to console. Passing a {@link LogLevel} string will use the same
+ * @property {LogLevel|LogLevels} [logLevel='warn'] - <code>(deprecated: use [Video.Logger](module-twilio-video.html) instead.
+ *   See [examples](module-twilio-video.html#.connect) for details)</code>
+ *   Set the default log verbosity
+ *   of logging. Passing a {@link LogLevel} string will use the same
  *   level for all components. Pass a {@link LogLevels} to set specific log
  *   levels.
+ * @property {string} [loggerName='twilio-video'] - The name of the logger. Use this name when accessing the logger used by the SDK.
+ *   See [examples](module-twilio-video.html#.connect) for details.
  * @property {Array<LocalTrack|MediaStreamTrack>} [tracks] - The
  *   {@link LocalTrack}s or MediaStreamTracks with which to join the
  *   {@link Room}. These tracks can be obtained either by calling
@@ -41844,6 +42598,7 @@ function connect(token, options) {
  *   lower {@link Track.Priority} will be subscribed to with the {@link Track.Priority} specified here.
  *   This has no effect on {@link RemoteVideoTrack}s published with higher {@link Track.Priority}, which will
  *   still be subscribed to with with the same {@link Track.Priority}. If not specified, this defaults to "standard".
+ *   This parameter only applies to a Group Room Participant when {@link ConnectOptions}.dominantSpeaker is set to true.
  * @property {number} [maxSubscriptionBitrate] - Optional parameter to specify the maximum
  *   downlink video bandwidth in bits per second (bps). By default, there are no limits on
  *   the downlink video bandwidth.
@@ -41897,6 +42652,22 @@ function connect(token, options) {
  */
 
 /**
+ * Audio codec settings.
+ * @typedef {object} AudioCodecSettings
+ * @property {AudioCodec} codec - Audio codec name
+ */
+
+/**
+ * Opus codec settings.
+ * @typedef {AudioCodecSettings} OpusCodecSettings
+ * @property {AudioCodec} name - "opus"
+ * @property {boolean} [dtx=true] - Enable/disable discontinuous transmission (DTX);
+ *   If enabled all published {@link LocalAudioTrack}s will reduce the outgoing bitrate
+ *   to near-zero whenever speech is not detected, resulting in bandwidth and CPU savings;
+ *   It defaults to true.
+ */
+
+/**
  * Video codec settings.
  * @typedef {object} VideoCodecSettings
  * @property {VideoCodec} codec - Video codec name
@@ -41906,7 +42677,7 @@ function connect(token, options) {
  * VP8 codec settings.
  * @typedef {VideoCodecSettings} VP8CodecSettings
  * @property {VideoCodec} name - "VP8"
- * @property {boolean} [simulcast=false] - Enable/disable VP8 simulcast; if
+ * @property {boolean} [simulcast=false] - Enable/disable VP8 simulcast; If
  *   enabled, Twilio's Video SDK will send three video streams of different
  *   qualities
  */
@@ -42039,6 +42810,147 @@ var BandwidthProfileMode = {
   presentation: 'presentation'
 };
 
+/**
+ * Names of the supported levels for {@link EventListenerEvent}s.
+ * @enum {string}
+ */
+// eslint-disable-next-line
+var EventListenerLevel = {
+  debug: 'debug',
+  error: 'error',
+  info: 'info',
+  warning: 'warning'
+};
+
+/**
+ * Names of the supported groups for {@link EventListenerEvent}s.
+ * @enum {string}
+ */
+// eslint-disable-next-line
+var EventListenerGroup = {
+  /**
+   * Events associated with the connection to Twilio's signaling server
+   */
+  signaling: 'signaling'
+};
+
+/**
+ * An {@link EventListener} allows you to listen to fine-grained {@link EventListenerEvent}s related
+ * to signaling and media that are not available in the public APIs, which might be useful for your own
+ * reporting and diagnostics.
+ * @typedef {EventEmitter} EventListener
+ * @example
+ * const { EventEmitter } = require('events');
+ * const { connect } = require('twilio-video');
+ *
+ * const eventListener = new EventEmitter();
+ * eventListener.on('event', function(event) {
+ *   console.log('The SDK raised an event:', event);
+ * });
+ *
+ * connect('token', {
+ *   eventListener: eventListener
+ * });
+ */
+
+/**
+ * The SDK raised an {@link EventListenerEvent}.
+ * @event EventListener#event
+ * @param {EventListenerEvent} event - Context about the event raised by the SDK.
+ * This can be one of the following:
+ *  * {@link EventListenerClosedEvent}
+ *  * {@link EventListenerConnectingEvent}
+ *  * {@link EventListenerEarlyEvent}
+ *  * {@link EventListenerOpenEvent}
+ *  * {@link EventListenerWaitingEvent}
+ */
+
+/**
+ * An {@link EventListenerEvent} provides context about an event raised by the SDK on the
+ * {@link EventListener}. Apart from the properties listed here, it may also include some
+ * event-specific data within an optional "payload" property. The different types of
+ * {@link EventListenerEvent}s are listed below:
+ *  * {@link EventListenerClosedEvent}
+ *  * {@link EventListenerConnectingEvent}
+ *  * {@link EventListenerEarlyEvent}
+ *  * {@link EventListenerOpenEvent}
+ *  * {@link EventListenerWaitingEvent}
+ * @typedef {object} EventListenerEvent
+ * @property {number} elapsedTime - The time elapsed in milliseconds since connect() was called
+ * @property {EventListenerGroup} group - The group under which the event is classified
+ * @property {EventListenerLevel} level - The verbosity level of the event, which can be one of "debug", "error", "info", "warning"
+ * @property {string} name - The name of the event
+ * @property {*} [payload] - Optional event-specific data
+ * @property {number} timestamp - The time in milliseconds relative to the Unix Epoch when the event was raised
+ */
+
+/**
+ * The connection to Twilio's signaling server was closed.
+ * @typedef {EventListenerEvent} EventListenerClosedEvent
+ * @property {EventListenerGroup} group='signaling'
+ * @property {EventListenerLevel} level - 'info' if the connection was closed by the client, 'error' otherwise
+ * @property {string} name='closed'
+ * @property {{reason: string}} payload - Reason for the connection being closed. It can be one of
+ *   'busy', 'failed', 'local', 'remote' or 'timeout'
+ */
+
+/**
+ * The SDK is connecting to Twilio's signaling server.
+ * @typedef {EventListenerEvent} EventListenerConnectingEvent
+ * @property {EventListenerGroup} group='signaling'
+ * @property {EventListenerLevel} level='info'
+ * @property {string} name='connecting'
+ */
+
+/**
+ * The SDK is about to connect to Twilio's signaling server.
+ * @typedef {EventListenerEvent} EventListenerEarlyEvent
+ * @property {EventListenerGroup} group='signaling'
+ * @property {EventListenerLevel} level='info'
+ * @property {string} name='early'
+ */
+
+/**
+ * The SDK has established a signaling connection to Twilio's signaling server.
+ * @typedef {EventListenerEvent} EventListenerOpenEvent
+ * @property {EventListenerGroup} group='signaling'
+ * @property {EventListenerLevel} level='info'
+ * @property {string} name='open'
+ */
+
+/**
+ * The SDK is waiting to retry connecting th Twilio's signaling server. This can
+ * happen if the server is busy with too many connection requests.
+ * @typedef {EventListenerEvent} EventListenerWaitingEvent
+ * @property {EventListenerGroup} group='signaling'
+ * @property {EventListenerLevel} level='warning'
+ * @property {string} name='waiting'
+ */
+
+var deprecatedConnectOptionsProps = new Set([{ didWarn: false, shouldDelete: true, name: 'abortOnIceServersTimeout' }, { didWarn: false, shouldDelete: true, name: 'dscpTagging', newName: 'enableDscp' }, { didWarn: false, shouldDelete: true, name: 'iceServersTimeout' }, { didWarn: false, shouldDelete: false, name: 'eventListener', newName: 'Video.Logger' }, { didWarn: false, shouldDelete: false, name: 'logLevel', newName: 'Video.Logger' }]);
+
+function deprecateOptions(options, log) {
+  deprecatedConnectOptionsProps.forEach(function (prop) {
+    var didWarn = prop.didWarn,
+        name = prop.name,
+        newName = prop.newName,
+        shouldDelete = prop.shouldDelete;
+
+    if (name in options && typeof options[name] !== 'undefined') {
+      if (newName && shouldDelete) {
+        options[newName] = options[name];
+      }
+      if (shouldDelete) {
+        delete options[name];
+      }
+      if (!didWarn && !['error', 'off'].includes(log.level)) {
+        log.warn('The ConnectOptions "' + name + '" is ' + (newName ? 'deprecated and scheduled for removal. Please use "' + newName + '" instead.' : 'no longer applicable and will be ignored.'));
+        prop.didWarn = true;
+      }
+    }
+  });
+}
+
 function createLocalParticipant(signaling, log, encodingParameters, networkQualityConfiguration, options, localTracks) {
   var localParticipantSignaling = signaling.createLocalParticipantSignaling(encodingParameters, networkQualityConfiguration);
   log.debug('Creating a new LocalParticipant:', localParticipantSignaling);
@@ -42060,25 +42972,9 @@ function createRoom(options, localParticipant, roomSignaling) {
   return room;
 }
 
-function createRoomSignaling(token, options, signaling, iceServerSource, encodingParameters, preferredCodecs, localParticipant) {
-  var log = options.log;
-  log.info('Getting ICE servers');
-  log.debug('Options:', options);
-
-  return iceServerSource.start().then(function (iceServers) {
-    var roomSignalingParams = {
-      token: token
-    };
-
-    log.info('Got ICE servers');
-    log.debug('ICE servers:', iceServers);
-
-    options.iceServers = iceServers;
-    log.debug('Creating a new RoomSignaling');
-    log.debug('RoomSignaling params:', roomSignalingParams);
-
-    return signaling.connect(localParticipant._signaling, token, iceServerSource, encodingParameters, preferredCodecs, options);
-  });
+function createRoomSignaling(token, options, signaling, encodingParameters, preferredCodecs, localParticipant) {
+  options.log.debug('Creating a new RoomSignaling');
+  return signaling.connect(localParticipant._signaling, token, encodingParameters, preferredCodecs, options);
 }
 
 function getLocalTracks(options, handleLocalTracks) {
@@ -42108,9 +43004,13 @@ function getLocalTracks(options, handleLocalTracks) {
   });
 }
 
-function normalizeVideoCodecSettings(nameOrSettings) {
+function normalizeCodecSettings(nameOrSettings) {
   var settings = typeof nameOrSettings === 'string' ? { codec: nameOrSettings } : nameOrSettings;
   switch (settings.codec.toLowerCase()) {
+    case 'opus':
+      {
+        return Object.assign({ dtx: true }, settings);
+      }
     case 'vp8':
       {
         return Object.assign({ simulcast: false }, settings);
@@ -42137,7 +43037,10 @@ module.exports = connect;
 
 
 var defaultCreateLocalTracks = __webpack_require__(/*! ./createlocaltracks */ "./node_modules/twilio-video/es5/createlocaltracks.js");
-var DEFAULT_LOG_LEVEL = __webpack_require__(/*! ./util/constants */ "./node_modules/twilio-video/es5/util/constants.js").DEFAULT_LOG_LEVEL;
+
+var _require = __webpack_require__(/*! ./util/constants */ "./node_modules/twilio-video/es5/util/constants.js"),
+    DEFAULT_LOG_LEVEL = _require.DEFAULT_LOG_LEVEL,
+    DEFAULT_LOGGER_NAME = _require.DEFAULT_LOGGER_NAME;
 
 /**
  * Request a {@link LocalAudioTrack} or {@link LocalVideoTrack}.
@@ -42146,14 +43049,19 @@ var DEFAULT_LOG_LEVEL = __webpack_require__(/*! ./util/constants */ "./node_modu
  * @returns {Promise<LocalAudioTrack|LocalVideoTrack>}
  * @private
  */
+
+
 function createLocalTrack(kind, options) {
   options = Object.assign({
     createLocalTracks: defaultCreateLocalTracks,
+    loggerName: DEFAULT_LOGGER_NAME,
     logLevel: DEFAULT_LOG_LEVEL
   }, options);
 
   var createOptions = {};
+  createOptions.loggerName = options.loggerName;
   createOptions.logLevel = options.logLevel;
+  delete options.loggerName;
   delete options.logLevel;
 
   var createLocalTracks = options.createLocalTracks;
@@ -42196,7 +43104,10 @@ function createLocalAudioTrack(options) {
 }
 
 /**
- * Request a {@link LocalVideoTrack}.
+ * Request a {@link LocalVideoTrack}. Note that on mobile browsers,
+ * the camera can be reserved by only one {@link LocalVideoTrack} at any given
+ * time. If you attempt to create a second {@link LocalVideoTrack}, video frames
+ * will no longer be supplied to the first {@link LocalVideoTrack}.
  * @alias module:twilio-video.createLocalVideoTrack
  * @param {CreateLocalTrackOptions} [options] - Options for requesting a {@link LocalVideoTrack}
  * @returns {Promise<LocalVideoTrack>}
@@ -42226,9 +43137,18 @@ function createLocalVideoTrack(options) {
 }
 
 /**
- * Create {@link LocalTrack} options.
+ * Create {@link LocalTrack} options. Apart from the properties listed here, you can
+ * also specify any of the <a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaTrackConstraints" target="_blank">MediaTrackConstraints</a>
+ * properties.
  * @typedef {MediaTrackConstraints} CreateLocalTrackOptions
- * @property {LogLevel|LogLevels} logLevel
+ * @property {LogLevel|LogLevels} [logLevel='warn'] - <code>(deprecated: use [Video.Logger](module-twilio-video.html) instead.
+ *   See [examples](module-twilio-video.html#.connect) for details)</code>
+ *   Set the default log verbosity
+ *   of logging. Passing a {@link LogLevel} string will use the same
+ *   level for all components. Pass a {@link LogLevels} to set specific log
+ *   levels.
+ * @property {string} [loggerName='twilio-video'] - The name of the logger. Use this name when accessing the logger used by the SDK.
+ *   See [examples](module-twilio-video.html#.connect) for details.
  * @property {string} [name] - The {@link LocalTrack}'s name; by default,
  *   it is set to the {@link LocalTrack}'s ID.
  * @property {boolean} [workaroundWebKitBug180748=false] - Only valid for
@@ -42257,12 +43177,19 @@ module.exports = {
 var asLocalTrack = __webpack_require__(/*! ./util */ "./node_modules/twilio-video/es5/util/index.js").asLocalTrack;
 var buildLogLevels = __webpack_require__(/*! ./util */ "./node_modules/twilio-video/es5/util/index.js").buildLogLevels;
 var getUserMedia = __webpack_require__(/*! @twilio/webrtc */ "./node_modules/@twilio/webrtc/lib/index.js").getUserMedia;
-var LocalAudioTrack = __webpack_require__(/*! ./media/track/es5/localaudiotrack */ "./node_modules/twilio-video/es5/media/track/es5/localaudiotrack.js");
-var LocalDataTrack = __webpack_require__(/*! ./media/track/es5/localdatatrack */ "./node_modules/twilio-video/es5/media/track/es5/localdatatrack.js");
-var LocalVideoTrack = __webpack_require__(/*! ./media/track/es5/localvideotrack */ "./node_modules/twilio-video/es5/media/track/es5/localvideotrack.js");
+
+var _require = __webpack_require__(/*! ./media/track/es5 */ "./node_modules/twilio-video/es5/media/track/es5/index.js"),
+    LocalAudioTrack = _require.LocalAudioTrack,
+    LocalDataTrack = _require.LocalDataTrack,
+    LocalVideoTrack = _require.LocalVideoTrack;
+
 var MediaStreamTrack = __webpack_require__(/*! @twilio/webrtc */ "./node_modules/@twilio/webrtc/lib/index.js").MediaStreamTrack;
 var Log = __webpack_require__(/*! ./util/log */ "./node_modules/twilio-video/es5/util/log.js");
-var DEFAULT_LOG_LEVEL = __webpack_require__(/*! ./util/constants */ "./node_modules/twilio-video/es5/util/constants.js").DEFAULT_LOG_LEVEL;
+
+var _require2 = __webpack_require__(/*! ./util/constants */ "./node_modules/twilio-video/es5/util/constants.js"),
+    DEFAULT_LOG_LEVEL = _require2.DEFAULT_LOG_LEVEL,
+    DEFAULT_LOGGER_NAME = _require2.DEFAULT_LOGGER_NAME;
+
 var workaround180748 = __webpack_require__(/*! ./webaudio/workaround180748 */ "./node_modules/twilio-video/es5/webaudio/workaround180748.js");
 
 // This is used to make out which createLocalTracks() call a particular Log
@@ -42273,6 +43200,9 @@ var createLocalTrackCalls = 0;
 /**
  * Request {@link LocalTrack}s. By default, it requests a
  * {@link LocalAudioTrack} and a {@link LocalVideoTrack}.
+ * Note that on mobile browsers, the camera can be reserved by only one {@link LocalVideoTrack}
+ * at any given time. If you attempt to create a second {@link LocalVideoTrack}, video frames
+ * will no longer be supplied to the first {@link LocalVideoTrack}.
  * @alias module:twilio-video.createLocalTracks
  * @param {CreateLocalTracksOptions} [options]
  * @returns {Promise<Array<LocalTrack>>}
@@ -42305,6 +43235,24 @@ var createLocalTrackCalls = 0;
  *     console.log(localTrack.name);
  *   });
  * });
+ *
+ * @example
+ * var Video = require('twilio-video');
+ * var localTracks;
+ *
+ * // Pre-acquire tracks to display camera preview.
+ * Video.createLocalTracks().then(function(tracks) {
+ *  localTracks = tracks;
+ *  var localVideoTrack = localTracks.find(track => track.kind === 'video');
+ *  divContainer.appendChild(localVideoTrack.attach());
+ * })
+ *
+ * // Later, join the Room with the pre-acquired LocalTracks.
+ * Video.connect('token', {
+ *   name: 'my-cool-room',
+ *   tracks: localTracks
+ * });
+ *
  */
 function createLocalTracks(options) {
   var isAudioVideoAbsent = !(options && ('audio' in options || 'video' in options));
@@ -42312,6 +43260,7 @@ function createLocalTracks(options) {
   options = Object.assign({
     audio: isAudioVideoAbsent,
     getUserMedia: getUserMedia,
+    loggerName: DEFAULT_LOGGER_NAME,
     logLevel: DEFAULT_LOG_LEVEL,
     LocalAudioTrack: LocalAudioTrack,
     LocalDataTrack: LocalDataTrack,
@@ -42323,7 +43272,7 @@ function createLocalTracks(options) {
 
   var logComponentName = '[createLocalTracks #' + ++createLocalTrackCalls + ']';
   var logLevels = buildLogLevels(options.logLevel);
-  var log = new options.Log('default', logComponentName, logLevels);
+  var log = new options.Log('default', logComponentName, logLevels, options.loggerName);
 
   // NOTE(mmalavalli): The Room "name" in "options" was being used
   // as the LocalTrack name in asLocalTrack(). So we pass a copy of
@@ -42342,10 +43291,21 @@ function createLocalTracks(options) {
     return Promise.resolve(options.tracks);
   }
 
-  var localTrackNameOptions = {
+  var extraLocalTrackOptions = {
     audio: options.audio && options.audio.name ? { name: options.audio.name } : {},
     video: options.video && options.video.name ? { name: options.video.name } : {}
   };
+
+  extraLocalTrackOptions.audio.isCreatedByCreateLocalTracks = true;
+  extraLocalTrackOptions.video.isCreatedByCreateLocalTracks = true;
+
+  if (options.audio && typeof options.audio.workaroundWebKitBug1208516 === 'boolean') {
+    extraLocalTrackOptions.audio.workaroundWebKitBug1208516 = options.audio.workaroundWebKitBug1208516;
+  }
+
+  if (options.video && typeof options.video.workaroundWebKitBug1208516 === 'boolean') {
+    extraLocalTrackOptions.video.workaroundWebKitBug1208516 = options.video.workaroundWebKitBug1208516;
+  }
 
   if (options.audio) {
     delete options.audio.name;
@@ -42369,7 +43329,7 @@ function createLocalTracks(options) {
     log.info('Call to getUserMedia successful; got MediaStreamTracks:', mediaStreamTracks);
 
     return mediaStreamTracks.map(function (mediaStreamTrack) {
-      return asLocalTrack(mediaStreamTrack, Object.assign(localTrackNameOptions[mediaStreamTrack.kind], localTrackOptions));
+      return asLocalTrack(mediaStreamTrack, Object.assign(extraLocalTrackOptions[mediaStreamTrack.kind], localTrackOptions));
     });
   }, function (error) {
     log.warn('Call to getUserMedia failed:', error);
@@ -42383,10 +43343,14 @@ function createLocalTracks(options) {
  * @property {boolean|CreateLocalTrackOptions} [audio=true] - Whether or not to
  *   get local audio with <code>getUserMedia</code> when <code>tracks</code>
  *   are not provided.
- * @property {LogLevel|LogLevels} [logLevel='warn'] - Set the log verbosity
- *   of logging to console. Passing a {@link LogLevel} string will use the same
+ * @property {LogLevel|LogLevels} [logLevel='warn'] - <code>(deprecated: use [Video.Logger](module-twilio-video.html) instead.
+ *   See [examples](module-twilio-video.html#.connect) for details)</code>
+ *   Set the default log verbosity
+ *   of logging. Passing a {@link LogLevel} string will use the same
  *   level for all components. Pass a {@link LogLevels} to set specific log
  *   levels.
+ * @property {string} [loggerName='twilio-video'] - The name of the logger. Use this name when accessing the logger used by the SDK.
+ *   See [examples](module-twilio-video.html#.connect) for details.
  * @property {boolean|CreateLocalTrackOptions} [video=true] - Whether or not to
  *   get local video with <code>getUserMedia</code> when <code>tracks</code>
  *   are not provided.
@@ -42566,13 +43530,12 @@ var DataTrackSender = function (_DataTrackTransceiver) {
 
     /**
      * Remove a cloned {@link DataTrackSender}.
-     * @private
      * @returns {void}
      */
 
   }, {
-    key: '_removeClone',
-    value: function _removeClone(clone) {
+    key: 'removeClone',
+    value: function removeClone(clone) {
       this._clones.delete(clone);
     }
 
@@ -42604,7 +43567,7 @@ var DataTrackSender = function (_DataTrackTransceiver) {
       var clone = new DataTrackSender(this.maxPacketLifeTime, this.maxRetransmits, this.ordered);
       this._addClone(clone);
       clone.once('stopped', function () {
-        return _this2._removeClone(clone);
+        return _this2.removeClone(clone);
       });
       return clone;
     }
@@ -42862,85 +43825,6 @@ module.exports = DataTransport;
 
 /***/ }),
 
-/***/ "./node_modules/twilio-video/es5/ecs.js":
-/*!**********************************************!*\
-  !*** ./node_modules/twilio-video/es5/ecs.js ***!
-  \**********************************************/
-/*! no static exports found */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var request = __webpack_require__(/*! ./request */ "./node_modules/twilio-video/es5/request.js");
-var createTwilioError = __webpack_require__(/*! ./util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js").createTwilioError;
-var ConfigurationAcquireFailedError = __webpack_require__(/*! ./util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js").ConfigurationAcquireFailedError;
-
-var CONFIG_URL = 'https://ecs.us1.twilio.com/v1/Configuration';
-
-/**
- * Request a configuration setting for the specified JWT.
- * @param {String} token - A JWT String representing a valid AccessToken.
- * @param {?ECS.getConfigurationOptions} [options]
- * @returns {Promise<Object>} configuration - An unformatted map of
- *   configuration settings specific to the specified service.
- * @throws {TwilioError}
-*/ /**
-   * @typedef {Object} ECS.getConfigurationOptions
-   * @property {?Object} [body] - A valid JSON payload to send to the
-   *   ECS endpoint.
-   * @property {?String} [configUrl='https://ecs.us1.twilio.com/v1/Configuration'] - A
-   *   custom URL to POST ECS configuration requests to.
-   */
-function getConfiguration(token, options) {
-  if (!token) {
-    throw new Error('<String>token is a required argument.');
-  }
-
-  options = Object.assign({
-    configUrl: CONFIG_URL
-  }, options);
-
-  var postData = {
-    url: options.configUrl,
-    headers: {
-      'X-Twilio-Token': token,
-      'Content-Type': 'application/x-www-form-urlencoded'
-    }
-  };
-
-  if (options.body) {
-    postData.body = toQueryString(options.body);
-  }
-
-  return request.post(postData).then(function (responseText) {
-    return parseJsonTextFromECS(responseText);
-  }, function (errorText) {
-    var error = parseJsonTextFromECS(errorText);
-    throw createTwilioError(error.code, error.message);
-  });
-}
-
-function parseJsonTextFromECS(jsonText) {
-  var json = null;
-  try {
-    json = JSON.parse(jsonText);
-  } catch (error) {
-    throw new ConfigurationAcquireFailedError();
-  }
-  return json;
-}
-
-function toQueryString(params) {
-  return Object.keys(params || {}).map(function (key) {
-    return encodeURIComponent(key) + '=' + encodeURIComponent(params[key]);
-  }).join('&');
-}
-
-module.exports.getConfiguration = getConfiguration;
-
-/***/ }),
-
 /***/ "./node_modules/twilio-video/es5/encodingparameters.js":
 /*!*************************************************************!*\
   !*** ./node_modules/twilio-video/es5/encodingparameters.js ***!
@@ -43078,392 +43962,6 @@ module.exports = hidePrivateAndCertainPublicPropertiesInClass(EventEmitter, ['do
 
 /***/ }),
 
-/***/ "./node_modules/twilio-video/es5/iceserversource/constant.js":
-/*!*******************************************************************!*\
-  !*** ./node_modules/twilio-video/es5/iceserversource/constant.js ***!
-  \*******************************************************************/
-/*! no static exports found */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
-
-function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
-
-function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
-
-function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
-
-var EventEmitter = __webpack_require__(/*! events */ "./node_modules/events/events.js").EventEmitter;
-
-var instances = 0;
-
-/**
- * A {@link ConstantIceServerSource} only ever returns a single set of ICE
- * servers. It is useful for providing a hard-coded set of ICE servers.
- * @extends EventEmitter
- * @implements {IceServerSource}
- */
-
-var ConstantIceServerSource = function (_EventEmitter) {
-  _inherits(ConstantIceServerSource, _EventEmitter);
-
-  /**
-   * Construct a {@link ConstantIceServerSource}.
-   * @param {Array<RTCIceServerInit>} iceServers
-   */
-  function ConstantIceServerSource(iceServers) {
-    _classCallCheck(this, ConstantIceServerSource);
-
-    var _this = _possibleConstructorReturn(this, (ConstantIceServerSource.__proto__ || Object.getPrototypeOf(ConstantIceServerSource)).call(this));
-
-    Object.defineProperties(_this, {
-      _instance: {
-        value: ++instances
-      },
-      _iceServers: {
-        enumerable: true,
-        value: iceServers,
-        writable: true
-      },
-      _isStarted: {
-        value: false,
-        writable: true
-      },
-      isStarted: {
-        enumerable: true,
-        get: function get() {
-          return this._isStarted;
-        }
-      },
-      status: {
-        enumerable: true,
-        value: 'overrode'
-      }
-    });
-    return _this;
-  }
-
-  _createClass(ConstantIceServerSource, [{
-    key: 'start',
-    value: function start() {
-      this._isStarted = true;
-      return Promise.resolve(this._iceServers);
-    }
-  }, {
-    key: 'stop',
-    value: function stop() {
-      this._isStarted = false;
-    }
-  }, {
-    key: 'toString',
-    value: function toString() {
-      return '[ConstantIceServerSource #' + this._instance + ']';
-    }
-  }]);
-
-  return ConstantIceServerSource;
-}(EventEmitter);
-
-module.exports = ConstantIceServerSource;
-
-/***/ }),
-
-/***/ "./node_modules/twilio-video/es5/iceserversource/nts.js":
-/*!**************************************************************!*\
-  !*** ./node_modules/twilio-video/es5/iceserversource/nts.js ***!
-  \**************************************************************/
-/*! no static exports found */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
-
-function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
-
-function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
-
-function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
-
-var constants = __webpack_require__(/*! ../util/constants */ "./node_modules/twilio-video/es5/util/constants.js");
-var ECS = __webpack_require__(/*! ../ecs */ "./node_modules/twilio-video/es5/ecs.js");
-var EventEmitter = __webpack_require__(/*! events */ "./node_modules/events/events.js").EventEmitter;
-var Log = __webpack_require__(/*! ../util/log */ "./node_modules/twilio-video/es5/util/log.js");
-var TimeoutPromise = __webpack_require__(/*! ../util/timeoutpromise */ "./node_modules/twilio-video/es5/util/timeoutpromise.js");
-var util = __webpack_require__(/*! ../util */ "./node_modules/twilio-video/es5/util/index.js");
-
-var _require = __webpack_require__(/*! ../util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js"),
-    ConfigurationAcquireFailedError = _require.ConfigurationAcquireFailedError;
-
-var version = __webpack_require__(/*! ../../package.json */ "./node_modules/twilio-video/package.json").version;
-
-var instances = 0;
-
-/**
- * @typedef {ECS.getConfigurationOptions} NTSIceServerSourceOptions
- * @property {Array<RTCIceServerInit>} [defaultIceServers]
- * @property {number} [defaultTTL]
- * @property {string} [ecsServer]
- * @property {string} [environment="prod"]
- * @property {function(string, ECS.getConfigurationOptions): Promise<object>} [getConfiguration]
- * @property {string} [realm="us1"]
- * @property {Log} [log]
- * @property {number} [timeout]
- */
-
-/**
- * A Network Traversal Service (NTS)-backed implementation of
- * {@link IceServerSource}; useful for getting fresh TURN servers from Twilio.
- * @extends EventEmitter
- * @implements {IceServerSource}
- */
-
-var NTSIceServerSource = function (_EventEmitter) {
-  _inherits(NTSIceServerSource, _EventEmitter);
-
-  /**
-   * Construct an {@link NTSIceServerSource}.
-   * @param {string} token - Access Token
-   * @param {NTSIceServerSourceOptions} [options]
-   */
-  function NTSIceServerSource(token, options) {
-    _classCallCheck(this, NTSIceServerSource);
-
-    var _this = _possibleConstructorReturn(this, (NTSIceServerSource.__proto__ || Object.getPrototypeOf(NTSIceServerSource)).call(this));
-
-    options = Object.assign({
-      abortOnTimeout: false,
-      defaultTTL: constants.ICE_SERVERS_DEFAULT_TTL,
-      environment: constants.DEFAULT_ENVIRONMENT,
-      getConfiguration: ECS.getConfiguration,
-      realm: constants.DEFAULT_REALM,
-      timeout: constants.ICE_SERVERS_TIMEOUT_MS
-    }, options);
-
-    /* eslint-disable new-cap */
-    var defaultIceServers = constants.DEFAULT_ICE_SERVERS(options.environment);
-    var ecsServer = options.ecsServer || constants.ECS_SERVER(options.environment, options.realm);
-    /* eslint-enable new-cap */
-
-    var log = options.log ? options.log.createLog('default', _this) : new Log('default', _this, util.buildLogLevels('off'));
-
-    Object.defineProperties(_this, {
-      _abortOnTimeout: {
-        value: options.abortOnTimeout
-      },
-      // This Promise represents the current invocation of `poll`. `start` sets it
-      // and `stop` clears it out.
-      _currentPoll: {
-        value: null,
-        writable: true
-      },
-      // In the event that ECS or NTS fail to return ICE servers in a timely
-      // manner, NTSIceServerSource falls back to these servers.
-      _defaultIceServers: {
-        value: defaultIceServers
-      },
-      _defaultTTL: {
-        value: options.defaultTTL
-      },
-      // This is the ECS server NTSIceServerSource communicates with.
-      _ecsServer: {
-        value: ecsServer
-      },
-      _getConfiguration: {
-        value: options.getConfiguration
-      },
-      _instance: {
-        value: ++instances
-      },
-      // This timer ID represents the next invocation of `poll`.
-      _nextPoll: {
-        value: null,
-        writable: true
-      },
-      _log: {
-        value: log
-      },
-      _status: {
-        value: null,
-        writable: true
-      },
-      // This Deferred remains unresolved until `stop` is called. We use it to
-      // short-circuit in `poll`.
-      _stopped: {
-        value: util.defer(),
-        writable: true
-      },
-      // This value configures the amount of time NTSIceServerSource will wait
-      // when fetching ICE servers.
-      _timeout: {
-        value: options.timeout
-      },
-      // This is the Access Token NTSIceServerSource makes requests to ECS with.
-      _token: {
-        value: token
-      }
-    });
-
-    _this._log.info('Created a new NTSIceServerSource');
-    _this._log.debug('ECS server:', _this._ecsServer);
-    return _this;
-  }
-
-  _createClass(NTSIceServerSource, [{
-    key: 'start',
-    value: function start() {
-      if (!this.isStarted) {
-        this._log.info('Starting');
-        this._currentPoll = poll(this);
-      } else {
-        this._log.warn('Already started');
-      }
-      return this._currentPoll;
-    }
-  }, {
-    key: 'stop',
-    value: function stop() {
-      if (!this.isStarted) {
-        this._log.warn('Already stopped');
-        return;
-      }
-      this._log.info('Stopping');
-      this._currentPoll = null;
-      clearTimeout(this._nextPoll);
-      this._stopped.resolve();
-      this._stopped = util.defer();
-      this._log.debug('Stopped');
-    }
-  }, {
-    key: 'toString',
-    value: function toString() {
-      return '[NTSIceServerSource #' + this._instance + ']';
-    }
-  }, {
-    key: 'isStarted',
-    get: function get() {
-      return !!this._currentPoll;
-    }
-  }, {
-    key: 'status',
-    get: function get() {
-      return this._status;
-    }
-  }]);
-
-  return NTSIceServerSource;
-}(EventEmitter);
-
-/**
- * Parse an ECS configuration value, log any warnings, and return a tuple of
- * ICE servers and TTL.
- * @param {NTSIceServerSource} client
- * @param {object} config
- * @returns {Array<Array<RTCIceServerInit>|Number>} iceServersAndTTL
- * @throws {Error}
- */
-
-
-function parseECSConfig(client, config) {
-  var nts = util.getOrNull(config, 'video.network_traversal_service');
-  if (!nts) {
-    throw new Error('network_traversal_service not available');
-  } else if (nts.warning) {
-    client._log.warn(nts.warning);
-  }
-
-  var iceServers = nts.ice_servers;
-  if (!iceServers) {
-    throw new Error('ice_servers not available');
-  }
-  client._log.info('Got ICE servers: ' + JSON.stringify(iceServers));
-
-  var ttl = nts.ttl || client._defaultTTL;
-  return [iceServers, ttl];
-}
-
-/**
- * Get ICE servers and their TTL.
- * @private
- * @param {NTSIceServerSource} nts
- * @returns {Promise<Array<RTCIceServerInit>>} iceServers
- */
-function poll(client) {
-  // We race `getConfiguration` against the `_stopped` Promise so that, when
-  // `stop` is called on the NTSIceServerSource, we can immediately proceed
-  // without waiting on `getConfiguration`.
-  client._log.debug('Getting ECS configuration');
-
-  var options = {
-    configUrl: client._ecsServer + '/v2/Configuration',
-    body: {
-      service: 'video',
-      /* eslint-disable camelcase */
-      sdk_version: version
-      /* eslint-enable camelcase */
-    }
-  };
-
-  var alreadyStopped = new Error('Already stopped');
-  var config = client._getConfiguration(client._token, options);
-  var configWithTimeout = new TimeoutPromise(config, client._timeout);
-
-  return Promise.race([configWithTimeout, client._stopped.promise]).then(function (config) {
-    if (!config) {
-      throw alreadyStopped;
-    }
-    var iceServersAndTTL = parseECSConfig(client, config);
-    client._status = 'success';
-    return iceServersAndTTL;
-  }).catch(function (error) {
-    client._status = 'failure';
-    if (!client.isStarted) {
-      throw alreadyStopped;
-    } else if (configWithTimeout.isTimedOut) {
-      if (client._abortOnTimeout) {
-        client._log.warn('Getting ICE servers took too long');
-        throw new ConfigurationAcquireFailedError();
-      }
-      client._log.warn('Getting ICE servers took too long (using defaults)');
-    } else {
-      // NOTE(mroberts): Stop if we get an Access Token error (2xxxx)
-      if (error.code && Math.floor(error.code / 10000) === 2) {
-        client.stop();
-      }
-      client._log.warn('Failed to get ICE servers (using defaults):', error);
-    }
-    return [client._defaultIceServers, client._defaultTTL];
-  }).then(function (iceServersAndTTL) {
-    var iceServers = iceServersAndTTL[0];
-    var ttl = iceServersAndTTL[1];
-
-    if (client.isStarted) {
-      client._log.info('Getting ICE servers again in ' + ttl + ' seconds');
-      client._nextPoll = setTimeout(function nextPoll() {
-        if (client.isStarted) {
-          client._currentPoll = poll(client);
-        }
-      }, (ttl - constants.ECS_TIMEOUT) * 1000);
-    }
-
-    client._iceServers = iceServers;
-    try {
-      client.emit('iceServers', iceServers);
-    } catch (error) {
-      // Do nothing.
-    }
-    return iceServers;
-  });
-}
-
-module.exports = NTSIceServerSource;
-
-/***/ }),
-
 /***/ "./node_modules/twilio-video/es5/index.js":
 /*!************************************************!*\
   !*** ./node_modules/twilio-video/es5/index.js ***!
@@ -43473,11 +43971,28 @@ module.exports = NTSIceServerSource;
 
 "use strict";
 
+
+var _require = __webpack_require__(/*! ./media/track/es5 */ "./node_modules/twilio-video/es5/media/track/es5/index.js"),
+    LocalAudioTrack = _require.LocalAudioTrack,
+    LocalDataTrack = _require.LocalDataTrack,
+    LocalVideoTrack = _require.LocalVideoTrack;
+
 /**
  * @module twilio-video
- * @property {boolean} isSupported - true if the current browser is officially supported by twilio-video.js.
+ * @property {boolean} isSupported - true if the current browser is officially
+ *   supported by twilio-video.js; In this context, "supported" means that
+ *   twilio-video.js has been extensively tested with this browser; This
+ *   <a href="https://www.twilio.com/docs/video/javascript#supported-browsers" target="_blank">table</a>
+ *   specifies the list of officially supported browsers.
+ *
+ * @property {object} Logger - The <a href="https://www.npmjs.com/package/loglevel" target="_blank">loglevel</a>
+ *    module used by the SDK. Use this object to access the internal loggers and perform actions as defined by the
+ *   <a href="https://www.npmjs.com/package/loglevel" target="_blank">loglevel</a> APIs.
+ *   See [connect](#.connect) for examples.
+ *
  * @property {string} version - current version of twilio-video.js.
  */
+
 
 var version = __webpack_require__(/*! ../package.json */ "./node_modules/twilio-video/package.json").version;
 var Video = {};
@@ -43505,15 +44020,19 @@ Object.defineProperties(Video, {
   },
   LocalAudioTrack: {
     enumerable: true,
-    value: __webpack_require__(/*! ./media/track/es5/localaudiotrack */ "./node_modules/twilio-video/es5/media/track/es5/localaudiotrack.js")
+    value: LocalAudioTrack
   },
   LocalDataTrack: {
     enumerable: true,
-    value: __webpack_require__(/*! ./media/track/es5/localdatatrack */ "./node_modules/twilio-video/es5/media/track/es5/localdatatrack.js")
+    value: LocalDataTrack
   },
   LocalVideoTrack: {
     enumerable: true,
-    value: __webpack_require__(/*! ./media/track/es5/localvideotrack */ "./node_modules/twilio-video/es5/media/track/es5/localvideotrack.js")
+    value: LocalVideoTrack
+  },
+  Logger: {
+    enumerable: true,
+    value: __webpack_require__(/*! ./vendor/loglevel */ "./node_modules/twilio-video/es5/vendor/loglevel.js")
   },
   version: {
     enumerable: true,
@@ -43562,9 +44081,11 @@ var _require3 = __webpack_require__(/*! ./util/constants */ "./node_modules/twil
 var _require4 = __webpack_require__(/*! ./util/validate */ "./node_modules/twilio-video/es5/util/validate.js"),
     validateLocalTrack = _require4.validateLocalTrack;
 
-var LocalAudioTrack = __webpack_require__(/*! ./media/track/es5/localaudiotrack */ "./node_modules/twilio-video/es5/media/track/es5/localaudiotrack.js");
-var LocalDataTrack = __webpack_require__(/*! ./media/track/es5/localdatatrack */ "./node_modules/twilio-video/es5/media/track/es5/localdatatrack.js");
-var LocalVideoTrack = __webpack_require__(/*! ./media/track/es5/localvideotrack */ "./node_modules/twilio-video/es5/media/track/es5/localvideotrack.js");
+var _require5 = __webpack_require__(/*! ./media/track/es5 */ "./node_modules/twilio-video/es5/media/track/es5/index.js"),
+    LocalAudioTrack = _require5.LocalAudioTrack,
+    LocalDataTrack = _require5.LocalDataTrack,
+    LocalVideoTrack = _require5.LocalVideoTrack;
+
 var LocalAudioTrackPublication = __webpack_require__(/*! ./media/track/localaudiotrackpublication */ "./node_modules/twilio-video/es5/media/track/localaudiotrackpublication.js");
 var LocalDataTrackPublication = __webpack_require__(/*! ./media/track/localdatatrackpublication */ "./node_modules/twilio-video/es5/media/track/localdatatrackpublication.js");
 var LocalVideoTrackPublication = __webpack_require__(/*! ./media/track/localvideotrackpublication */ "./node_modules/twilio-video/es5/media/track/localvideotrackpublication.js");
@@ -43582,6 +44103,11 @@ var Participant = __webpack_require__(/*! ./participant */ "./node_modules/twili
  *    The {@link LocalParticipant}'s {@link LocalTrackPublication}s
  * @property {Map<Track.SID, LocalVideoTrackPublication>} videoTracks -
  *    The {@link LocalParticipant}'s {@link LocalVideoTrackPublication}s
+ * @property {string} signalingRegion - The geographical region of the
+ *     signaling edge the {@link LocalParticipant} is connected to.
+ *
+ * @emits RemoteParticipant#reconnected
+ * @emits RemoteParticipant#reconnecting
  * @emits LocalParticipant#trackDimensionsChanged
  * @emits LocalParticipant#trackDisabled
  * @emits LocalParticipant#trackEnabled
@@ -43645,6 +44171,12 @@ var LocalParticipant = function (_Participant) {
       },
       _tracksToStop: {
         value: tracksToStop
+      },
+      signalingRegion: {
+        enumerable: true,
+        get: function get() {
+          return signaling.signalingRegion;
+        }
       }
     });
 
@@ -43762,6 +44294,7 @@ var LocalParticipant = function (_Participant) {
         if (trackSignaling) {
           trackSignaling.stop();
         }
+        return trackSignaling;
       }
 
       this.on('trackDisabled', localTrackDisabled);
@@ -43785,12 +44318,31 @@ var LocalParticipant = function (_Participant) {
           self.removeListener('trackDisabled', localTrackDisabled);
           self.removeListener('trackEnabled', localTrackEnabled);
           self.removeListener('trackStopped', localTrackStopped);
-          self._tracks.forEach(localTrackStopped);
+
+          // NOTE(mmalavalli): Remove the stale MediaTrackSender clones so that we
+          // do not call replaceTrack() on their RTCRtpSenders.
+          self._tracks.forEach(function (track) {
+            var trackSignaling = localTrackStopped(track);
+            if (trackSignaling) {
+              track._trackSender.removeClone(trackSignaling._trackTransceiver);
+            }
+          });
 
           log.info('LocalParticipant disconnected. Stopping ' + self._tracksToStop.size + ' automatically-acquired LocalTracks');
           self._tracksToStop.forEach(function (track) {
             track.stop();
           });
+        } else if (state === 'connected') {
+          // NOTE(mmalavalli): Any transition to "connected" here is a result of
+          // successful signaling reconnection, and not a first-time establishment
+          // of the signaling connection.
+          log.info('reconnected');
+
+          // NOTE(mpatwardhan): `stateChanged` can get emitted with StateMachine locked.
+          // Do not signal  public events synchronously with lock held.
+          setTimeout(function () {
+            return self.emit('reconnected');
+          }, 0);
         }
       });
     }
@@ -43880,7 +44432,10 @@ var LocalParticipant = function (_Participant) {
      * @param {LocalTrackPublishOptions} [options] - The {@link LocalTrackPublishOptions}
      *   for publishing the {@link LocalTrack}
      * @returns {Promise<LocalTrackPublication>} - Resolves with the corresponding
-     *   {@link LocalTrackPublication} if successful
+     *   {@link LocalTrackPublication} if successful; In a Large Group Room (Maximum
+     *   Participants greater than 50), rejects with a {@link ParticipantMaxTracksExceededError}
+     *   if either the total number of published Tracks in the Room exceeds 16, or the {@link LocalTrack}
+     *   is part of a set of {@link LocalTrack}s which along with the published Tracks exceeds 16.
      * @throws {TypeError}
      * @throws {RangeError}
      * @example
@@ -43911,7 +44466,10 @@ var LocalParticipant = function (_Participant) {
        * @param {MediaStreamTrackPublishOptions} [options] - The options for publishing
        *   the MediaStreamTrack
        * @returns {Promise<LocalTrackPublication>} - Resolves with the corresponding
-       *   {@link LocalTrackPublication} if successful
+       *   {@link LocalTrackPublication} if successful; In a Large Group Room (Maximum
+       *   Participants greater than 50), rejects with a {@link ParticipantMaxTracksExceededError}
+       *   if the total number of published Tracks in the Room exceeds 16, or the {@link LocalTrack}
+       *   is part of a set of {@link LocalTrack}s which along with the published Tracks exceeds 16.
        * @throws {TypeError}
        * @throws {RangeError}
        * @example
@@ -43979,7 +44537,10 @@ var LocalParticipant = function (_Participant) {
      *   {@link LocalAudioTrack} or {@link LocalVideoTrack} has not yet been
      *   published, this method will construct one
      * @returns {Promise<Array<LocalTrackPublication>>} - The resulting
-     *   {@link LocalTrackPublication}s
+     *   {@link LocalTrackPublication}s if successful; In a Large Group Room (Maximum
+     *   Participants greater than 50), rejects with a {@link ParticipantMaxTracksExceededError}
+     *   if the total number of published Tracks in the Room exceeds 16, or the {@link LocalTrack}s
+     *   along with the published Tracks exceeds 16.
      * @throws {TypeError}
      */
 
@@ -44148,6 +44709,16 @@ var LocalParticipant = function (_Participant) {
 }(Participant);
 
 /**
+ * The {@link LocalParticipant} has reconnected to the {@link Room} after a signaling connection disruption.
+ * @event LocalParticipant#reconnected
+ */
+
+/**
+ * The {@link LocalParticipant} is reconnecting to the {@link Room} after a signaling connection disruption.
+ * @event LocalParticipant#reconnecting
+ */
+
+/**
  * One of the {@link LocalParticipant}'s {@link LocalVideoTrack}'s dimensions changed.
  * @param {LocalVideoTrack} track - The {@link LocalVideoTrack} whose dimensions changed
  * @event LocalParticipant#trackDimensionsChanged
@@ -44167,7 +44738,11 @@ var LocalParticipant = function (_Participant) {
 
 /**
  * A {@link LocalTrack} failed to publish. Check the error message for more
- * information.
+ * information. In a Large Group Room (Maximum Participants greater than 50),
+ * this event is raised with a {@link ParticipantMaxTracksExceededError} either
+ * when attempting to publish the {@link LocalTrack} will exceed the Maximum Published
+ * Tracks limit of 16, or the {@link LocalTrack} is part of a set of {@link LocalTrack}s
+ * which along with the published Tracks exceeds 16.
  * @param {TwilioError} error - A {@link TwilioError} explaining why publication
  *   failed
  * @param {LocalTrack} localTrack - The {@link LocalTrack} that failed to
@@ -44443,6 +45018,24 @@ module.exports = AudioTrack;
 
 /***/ }),
 
+/***/ "./node_modules/twilio-video/es5/media/track/es5/index.js":
+/*!****************************************************************!*\
+  !*** ./node_modules/twilio-video/es5/media/track/es5/index.js ***!
+  \****************************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+module.exports = {
+  LocalAudioTrack: __webpack_require__(/*! ./localaudiotrack */ "./node_modules/twilio-video/es5/media/track/es5/localaudiotrack.js"),
+  LocalVideoTrack: __webpack_require__(/*! ./localvideotrack */ "./node_modules/twilio-video/es5/media/track/es5/localvideotrack.js"),
+  LocalDataTrack: __webpack_require__(/*! ./localdatatrack */ "./node_modules/twilio-video/es5/media/track/es5/localdatatrack.js")
+};
+
+/***/ }),
+
 /***/ "./node_modules/twilio-video/es5/media/track/es5/localaudiotrack.js":
 /*!**************************************************************************!*\
   !*** ./node_modules/twilio-video/es5/media/track/es5/localaudiotrack.js ***!
@@ -44592,7 +45185,7 @@ var Track = function (_EventEmitter) {
     var name = String(options.name);
 
     var logLevels = buildLogLevels(options.logLevel);
-    var log = options.log ? options.log.createLog('media', _this) : new Log('media', _this, logLevels);
+    var log = options.log ? options.log.createLog('media', _this) : new Log('media', _this, logLevels, options.loggerName);
 
     Object.defineProperties(_this, {
       _instanceId: {
@@ -44784,6 +45377,47 @@ var LocalAudioTrack = function (_LocalMediaAudioTrack) {
     }
 
     /**
+     * Restart the {@link LocalAudioTrack}. This stops the existing MediaStreamTrack
+     * and creates a new MediaStreamTrack. If the {@link LocalAudioTrack} is being published
+     * to a {@link Room}, then all the {@link RemoteParticipant}s will start receiving media
+     * from the newly created MediaStreamTrack. You can access the new MediaStreamTrack via
+     * the <code>mediaStreamTrack</code> property. If you want to listen to events on
+     * the MediaStreamTrack directly, please do so in the "started" event handler. Also,
+     * the {@link LocalAudioTrack}'s ID is no longer guaranteed to be the same as the
+     * underlying MediaStreamTrack's ID.
+     * @param {MediaTrackConstraints} [constraints] - The optional <a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaTrackConstraints" target="_blank">MediaTrackConstraints</a>
+     *   for restarting the {@link LocalAudioTrack}; If not specified, then the current MediaTrackConstraints
+     *   will be used; If <code>{}</code> (empty object) is specified, then the default MediaTrackConstraints
+     *   will be used
+     * @returns {Promise<void>} Rejects with a TypeError if the {@link LocalAudioTrack} was not created
+     *   using an one of <code>createLocalAudioTrack</code>, <code>createLocalTracks</code> or <code>connect</code>;
+     *   Also rejects with the <a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia#Exceptions" target="_blank">DOMException</a>
+     *   raised by <code>getUserMedia</code> when it fails
+     * @fires LocalAudioTrack#stopped
+     * @fires LocalAudioTrack#started
+     * @example
+     * const { connect, createLocalAudioTrack } = require('twilio-video');
+     *
+     * // Create a LocalAudioTrack that captures audio from a USB microphone.
+     * createLocalAudioTrack({ deviceId: 'usb-mic-id' }).then(function(localAudioTrack) {
+     *   return connect('token', {
+     *     name: 'my-cool-room',
+     *     tracks: [localAudioTrack]
+     *   });
+     * }).then(function(room) {
+     *   // Restart the LocalAudioTrack to capture audio from the default microphone.
+     *   const localAudioTrack = Array.from(room.localParticipant.audioTracks.values())[0].track;
+     *   return localAudioTrack.restart({ deviceId: 'default-mic-id' });
+     * });
+     */
+
+  }, {
+    key: 'restart',
+    value: function restart() {
+      return _get(LocalAudioTrack.prototype.__proto__ || Object.getPrototypeOf(LocalAudioTrack.prototype), 'restart', this).apply(this, arguments);
+    }
+
+    /**
      * Calls stop on the underlying MediaStreamTrack. If you choose to stop a
      * {@link LocalAudioTrack}, you should unpublish it after stopping.
      * @returns {this}
@@ -44821,9 +45455,9 @@ var LocalAudioTrack = function (_LocalMediaAudioTrack) {
  */
 
 /**
- * The {@link LocalAudioTrack} stopped, either because
- * {@link LocalAudioTrack#stop} was called or because the underlying
- * MediaStreamTrack ended).
+ * The {@link LocalAudioTrack} stopped, either because {@link LocalAudioTrack#stop}
+ * or {@link LocalAudioTrack#restart} was called or because the underlying
+ * MediaStreamTrack ended.
  * @param {LocalAudioTrack} track - The {@link LocalAudioTrack} that stopped
  * @event LocalAudioTrack#stopped
  */
@@ -44937,10 +45571,10 @@ var DefaultDataTrackSender = __webpack_require__(/*! ../../data/sender */ "./nod
  *
  * var localDataTrack = new Video.LocalDataTrack();
  * window.addEventListener('mousemove', function(event) {
- *   localDataTrack.send({
+ *   localDataTrack.send(JSON.stringify({
  *     x: e.clientX,
  *     y: e.clientY
- *   });
+ *   }));
  * });
  *
  * var token1 = getAccessToken();
@@ -44956,7 +45590,7 @@ var DefaultDataTrackSender = __webpack_require__(/*! ../../data/sender */ "./nod
  * }).then(function(room) {
  *   room.on('trackSubscribed', function(track) {
  *     track.on('message', function(message) {
- *       console.log(message); // { x: <number>, y: <number> }
+ *       console.log(JSON.parse(message)); // { x: <number>, y: <number> }
  *     });
  *   });
  * });
@@ -45116,11 +45750,16 @@ module.exports = LocalDataTrackPublication;
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
+/* eslint new-cap:0 */
 
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
 
 var _get = function get(object, property, receiver) { if (object === null) object = Function.prototype; var desc = Object.getOwnPropertyDescriptor(object, property); if (desc === undefined) { var parent = Object.getPrototypeOf(object); if (parent === null) { return undefined; } else { return get(parent, property, receiver); } } else if ("value" in desc) { return desc.value; } else { var getter = desc.get; if (getter === undefined) { return undefined; } return getter.call(receiver); } };
+
+function _defineProperty(obj, key, value) { if (key in obj) { Object.defineProperty(obj, key, { value: value, enumerable: true, configurable: true, writable: true }); } else { obj[key] = value; } return obj; }
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
@@ -45128,6 +45767,26 @@ function _possibleConstructorReturn(self, call) { if (!self) { throw new Referen
 
 function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
 
+var _require = __webpack_require__(/*! @twilio/webrtc */ "./node_modules/@twilio/webrtc/lib/index.js"),
+    getUserMedia = _require.getUserMedia;
+
+var _require2 = __webpack_require__(/*! @twilio/webrtc/lib/util */ "./node_modules/@twilio/webrtc/lib/util/index.js"),
+    guessBrowser = _require2.guessBrowser;
+
+var _require3 = __webpack_require__(/*! ../../util */ "./node_modules/twilio-video/es5/util/index.js"),
+    capitalize = _require3.capitalize,
+    defer = _require3.defer,
+    waitForSometime = _require3.waitForSometime,
+    waitForEvent = _require3.waitForEvent;
+
+var _require4 = __webpack_require__(/*! ../../util/constants */ "./node_modules/twilio-video/es5/util/constants.js"),
+    ILLEGAL_INVOKE = _require4.typeErrors.ILLEGAL_INVOKE;
+
+var detectSilentAudio = __webpack_require__(/*! ../../util/detectsilentaudio */ "./node_modules/twilio-video/es5/util/detectsilentaudio.js");
+var detectSilentVideo = __webpack_require__(/*! ../../util/detectsilentvideo */ "./node_modules/twilio-video/es5/util/detectsilentvideo.js");
+var documentVisibilityMonitor = __webpack_require__(/*! ../../util/documentvisibilitymonitor.js */ "./node_modules/twilio-video/es5/util/documentvisibilitymonitor.js");
+var localMediaRestartDeferreds = __webpack_require__(/*! ../../util/localmediarestartdeferreds */ "./node_modules/twilio-video/es5/util/localmediarestartdeferreds.js");
+var gUMSilentTrackWorkaround = __webpack_require__(/*! ../../webaudio/workaround180748 */ "./node_modules/twilio-video/es5/webaudio/workaround180748.js");
 var MediaTrackSender = __webpack_require__(/*! ./sender */ "./node_modules/twilio-video/es5/media/track/sender.js");
 
 function mixinLocalMediaTrack(AudioOrVideoTrack) {
@@ -45150,37 +45809,74 @@ function mixinLocalMediaTrack(AudioOrVideoTrack) {
     function LocalMediaTrack(mediaStreamTrack, options) {
       _classCallCheck(this, LocalMediaTrack);
 
-      options = Object.assign({}, options);
+      // NOTE(mpatwardhan): by default workaround for WebKitBug1208516 will be enabled on Safari browsers
+      // although the bug is seen  mainly on iOS devices, we do not have a reliable way to tell iOS from MacOs
+      // userAgent on iOS pretends its macOs if Safari is set to request desktop pages.
+      var workaroundWebKitBug1208516 = guessBrowser() === 'safari' && (typeof document === 'undefined' ? 'undefined' : _typeof(document)) === 'object' && typeof document.addEventListener === 'function' && typeof document.visibilityState === 'string';
+
+      options = Object.assign({
+        getUserMedia: getUserMedia,
+        isCreatedByCreateLocalTracks: false,
+        workaroundWebKitBug1208516: workaroundWebKitBug1208516,
+        gUMSilentTrackWorkaround: gUMSilentTrackWorkaround
+      }, options);
 
       var mediaTrackSender = new MediaTrackSender(mediaStreamTrack);
+      var kind = mediaTrackSender.kind;
 
       var _this = _possibleConstructorReturn(this, (LocalMediaTrack.__proto__ || Object.getPrototypeOf(LocalMediaTrack)).call(this, mediaTrackSender, options));
 
       Object.defineProperties(_this, {
+        _constraints: {
+          value: _typeof(options[kind]) === 'object' ? options[kind] : {},
+          writable: true
+        },
+        _getUserMedia: {
+          value: options.getUserMedia
+        },
+        _gUMSilentTrackWorkaround: {
+          value: options.gUMSilentTrackWorkaround
+        },
+        _workaroundWebKitBug1208516: {
+          value: options.workaroundWebKitBug1208516
+        },
+        _workaroundWebKitBug1208516Cleanup: {
+          value: null,
+          writable: true
+        },
         _didCallEnd: {
           value: false,
           writable: true
+        },
+        _isCreatedByCreateLocalTracks: {
+          value: options.isCreatedByCreateLocalTracks
         },
         _trackSender: {
           value: mediaTrackSender
         },
         id: {
           enumerable: true,
-          value: mediaStreamTrack.id
+          value: mediaTrackSender.id
         },
         isEnabled: {
           enumerable: true,
           get: function get() {
-            return mediaStreamTrack.enabled;
+            return mediaTrackSender.enabled;
           }
         },
         isStopped: {
           enumerable: true,
           get: function get() {
-            return mediaStreamTrack.readyState === 'ended';
+            return mediaTrackSender.readyState === 'ended';
           }
         }
       });
+
+      // NOTE(mpatwardhan): As a workaround for WebKit bug: https://bugs.webkit.org/show_bug.cgi?id=208516,
+      // upon foregrounding, re-acquire new MediaStreamTrack if the existing one is ended or muted.
+      if (_this._workaroundWebKitBug1208516) {
+        _this._workaroundWebKitBug1208516Cleanup = restartWhenInadvertentlyStopped(_this);
+      }
       return _this;
     }
 
@@ -45199,6 +45895,115 @@ function mixinLocalMediaTrack(AudioOrVideoTrack) {
         this._didCallEnd = true;
         this.emit('stopped', this);
       }
+
+      /**
+       * @private
+       */
+
+    }, {
+      key: '_initialize',
+      value: function _initialize() {
+        if (this._didCallEnd) {
+          this._didCallEnd = false;
+        }
+        _get(LocalMediaTrack.prototype.__proto__ || Object.getPrototypeOf(LocalMediaTrack.prototype), '_initialize', this).call(this);
+      }
+
+      /**
+       * @private
+       */
+
+    }, {
+      key: '_reacquireTrack',
+      value: function _reacquireTrack(constraints) {
+        var getUserMedia = this._getUserMedia,
+            gUMSilentTrackWorkaround = this._gUMSilentTrackWorkaround,
+            log = this._log,
+            kind = this.mediaStreamTrack.kind;
+
+
+        log.info('Re-acquiring the MediaStreamTrack');
+        log.debug('Constraints:', constraints);
+
+        var gUMConstraints = Object.assign({
+          audio: false,
+          video: false
+        }, _defineProperty({}, kind, constraints));
+
+        var gUMPromise = this._workaroundWebKitBug1208516Cleanup ? gUMSilentTrackWorkaround(log, getUserMedia, gUMConstraints) : getUserMedia(gUMConstraints);
+
+        return gUMPromise.then(function (mediaStream) {
+          return mediaStream.getTracks()[0];
+        });
+      }
+
+      /**
+       * @private
+       */
+
+    }, {
+      key: '_restart',
+      value: function _restart(constraints) {
+        var _this2 = this;
+
+        var log = this._log;
+
+        constraints = constraints || this._constraints;
+
+        // NOTE(mmalavalli): If we try and restart a silent MediaStreamTrack
+        // without stopping it first, then a NotReadableError is raised in case of
+        // video, or the restarted audio will still be silent. Hence, we stop the
+        // MediaStreamTrack here.
+        this._stop();
+
+        return this._reacquireTrack(constraints).catch(function (error) {
+          log.error('Failed to re-acquire the MediaStreamTrack:', { error: error, constraints: constraints });
+          throw error;
+        }).then(function (newMediaStreamTrack) {
+          log.info('Re-acquired the MediaStreamTrack');
+          log.debug('MediaStreamTrack:', newMediaStreamTrack);
+          _this2._constraints = Object.assign({}, constraints);
+          return _this2._setMediaStreamTrack(newMediaStreamTrack);
+        });
+      }
+
+      /**
+       * @private
+       */
+
+    }, {
+      key: '_setMediaStreamTrack',
+      value: function _setMediaStreamTrack(mediaStreamTrack) {
+        var _this3 = this;
+
+        // NOTE(mpatwardhan): Preserve the value of the "enabled" flag.
+        mediaStreamTrack.enabled = this.mediaStreamTrack.enabled;
+
+        // NOTE(mmalavalli): Stop the current MediaStreamTrack. If not already
+        // stopped, this should fire a "stopped" event.
+        this._stop();
+
+        return this._trackSender.setMediaStreamTrack(mediaStreamTrack).catch(function (error) {
+          _this3._log.warn('setMediaStreamTrack failed:', { error: error, mediaStreamTrack: mediaStreamTrack });
+        }).then(function () {
+          _this3._initialize();
+          _this3._getAllAttachedElements().forEach(function (el) {
+            return _this3._attach(el);
+          });
+        });
+      }
+
+      /**
+       * @private
+       */
+
+    }, {
+      key: '_stop',
+      value: function _stop() {
+        this.mediaStreamTrack.stop();
+        this._end();
+        return this;
+      }
     }, {
       key: 'enable',
       value: function enable(enabled) {
@@ -45216,17 +46021,164 @@ function mixinLocalMediaTrack(AudioOrVideoTrack) {
         return this.enable(false);
       }
     }, {
+      key: 'restart',
+      value: function restart(constraints) {
+        var _this4 = this;
+
+        var kind = this.kind;
+
+        if (!this._isCreatedByCreateLocalTracks) {
+          return Promise.reject(ILLEGAL_INVOKE('restart', 'can only be called on a' + (' Local' + capitalize(kind) + 'Track that is created using createLocalTracks') + (' or createLocal' + capitalize(kind) + 'Track.')));
+        }
+        if (this._workaroundWebKitBug1208516Cleanup) {
+          this._workaroundWebKitBug1208516Cleanup();
+          this._workaroundWebKitBug1208516Cleanup = null;
+        }
+        var promise = this._restart(constraints);
+
+        if (this._workaroundWebKitBug1208516) {
+          promise = promise.finally(function () {
+            _this4._workaroundWebKitBug1208516Cleanup = restartWhenInadvertentlyStopped(_this4);
+          });
+        }
+        return promise;
+      }
+    }, {
       key: 'stop',
       value: function stop() {
         this._log.info('Stopping');
-        this.mediaStreamTrack.stop();
-        this._end();
-        return this;
+        if (this._workaroundWebKitBug1208516Cleanup) {
+          this._workaroundWebKitBug1208516Cleanup();
+          this._workaroundWebKitBug1208516Cleanup = null;
+        }
+        return this._stop();
       }
     }]);
 
     return LocalMediaTrack;
   }(AudioOrVideoTrack);
+}
+
+/**
+ * Restart the given {@link LocalMediaTrack} if it has been inadvertently stopped.
+ * @private
+ * @param {LocalAudioTrack|LocalVideoTrack} localMediaTrack
+ * @returns {function} Clean up listeners attached by the workaround
+ */
+function restartWhenInadvertentlyStopped(localMediaTrack) {
+  var log = localMediaTrack._log,
+      kind = localMediaTrack.kind;
+
+  var detectSilence = { audio: detectSilentAudio, video: detectSilentVideo }[kind];
+
+  var el = localMediaTrack._dummyEl,
+      mediaStreamTrack = localMediaTrack.mediaStreamTrack;
+
+  var trackChangeInProgress = null;
+
+  function checkSilence() {
+    // The dummy element is paused, so play it and then detect silence.
+    return el.play().then(function () {
+      return detectSilence(el);
+    }).then(function (isSilent) {
+      if (isSilent) {
+        log.warn('Silence detected');
+      } else {
+        log.info('Non-silence detected');
+      }
+      return isSilent;
+    }).catch(function (error) {
+      log.warn('Failed to detect silence:', error);
+    }).finally(function () {
+      // Pause the dummy element again.
+      el.pause();
+    });
+  }
+
+  function shouldReacquireTrack() {
+    var _workaroundWebKitBug1208516Cleanup = localMediaTrack._workaroundWebKitBug1208516Cleanup,
+        isStopped = localMediaTrack.isStopped,
+        muted = localMediaTrack.mediaStreamTrack.muted;
+
+
+    var isInadvertentlyStopped = isStopped && !!_workaroundWebKitBug1208516Cleanup;
+
+    // NOTE(mmalavalli): Restart the LocalMediaTrack if:
+    // 1. The app is foregrounded, and
+    // 2. A restart is not already in progress, and
+    // 3. The LocalMediaTrack is either muted, inadvertently stopped or silent
+    return Promise.resolve().then(function () {
+      return document.visibilityState === 'visible' && !trackChangeInProgress && (muted || isInadvertentlyStopped || checkSilence());
+    });
+  }
+
+  function maybeRestart() {
+    return Promise.race([waitForEvent(mediaStreamTrack, 'unmute'), waitForSometime(50)]).then(function () {
+      return shouldReacquireTrack();
+    }).then(function (shouldReacquire) {
+      if (shouldReacquire && !trackChangeInProgress) {
+        trackChangeInProgress = defer();
+        localMediaTrack._restart().finally(function () {
+          el = localMediaTrack._dummyEl;
+          removeMediaStreamTrackListeners();
+          mediaStreamTrack = localMediaTrack.mediaStreamTrack;
+          addMediaStreamTrackListeners();
+          trackChangeInProgress.resolve();
+          trackChangeInProgress = null;
+        });
+      }
+
+      // NOTE(mmalavalli): If the MediaStreamTrack ends before the DOM is visible,
+      // then this makes sure that visibility callback for phase 2 is called only
+      // after the MediaStreamTrack is re-acquired.
+      var promise = trackChangeInProgress && trackChangeInProgress.promise || Promise.resolve();
+      return promise.finally(function () {
+        return localMediaRestartDeferreds.resolveDeferred(kind);
+      });
+    });
+  }
+
+  function onMute() {
+    var log = localMediaTrack._log,
+        kind = localMediaTrack.kind;
+
+    log.info('Muted');
+    log.debug('LocalMediaTrack:', localMediaTrack);
+
+    // NOTE(mmalavalli): When a LocalMediaTrack is muted without the app being
+    // backgrounded, and the inadvertently paused elements are played before it
+    // is restarted, it never gets unmuted due to the WebKit Bug 213853. Hence,
+    // setting this Deferred will make sure that the inadvertently paused elements
+    // are played only after the LocalMediaTrack is unmuted.
+    //
+    // Bug: https://bugs.webkit.org/show_bug.cgi?id=213853
+    //
+    localMediaRestartDeferreds.startDeferred(kind);
+  }
+
+  function addMediaStreamTrackListeners() {
+    mediaStreamTrack.addEventListener('ended', maybeRestart);
+    mediaStreamTrack.addEventListener('mute', onMute);
+    mediaStreamTrack.addEventListener('unmute', maybeRestart);
+  }
+
+  function removeMediaStreamTrackListeners() {
+    mediaStreamTrack.removeEventListener('ended', maybeRestart);
+    mediaStreamTrack.removeEventListener('mute', onMute);
+    mediaStreamTrack.removeEventListener('unmute', maybeRestart);
+  }
+
+  // NOTE(mpatwardhan): listen for document visibility callback on phase 1.
+  // this ensures that we acquire media tracks before RemoteMediaTrack
+  // tries to `play` them (in phase 2). This order is important because
+  // play can fail on safari if audio is not being captured.
+  documentVisibilityMonitor.onVisible(1, maybeRestart);
+  addMediaStreamTrackListeners();
+
+  return function () {
+    documentVisibilityMonitor.offVisible(1, maybeRestart);
+    removeMediaStreamTrackListeners();
+  };
 }
 
 module.exports = mixinLocalMediaTrack;
@@ -45261,6 +46213,7 @@ var _require = __webpack_require__(/*! ../../util/constants */ "./node_modules/t
 /**
  * A {@link LocalTrackPublication} is a {@link LocalTrack} that has been
  * published to a {@link Room}.
+ * @extends TrackPublication
  * @property {boolean} isTrackEnabled - whether the published {@link LocalTrack}
  *   is enabled
  * @property {Track.Kind} kind - kind of the published {@link LocalTrack}
@@ -45394,6 +46347,10 @@ function _possibleConstructorReturn(self, call) { if (!self) { throw new Referen
 
 function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
 
+var _require = __webpack_require__(/*! @twilio/webrtc/lib/util */ "./node_modules/@twilio/webrtc/lib/util/index.js"),
+    guessBrowser = _require.guessBrowser;
+
+var detectSilentVideo = __webpack_require__(/*! ../../util/detectsilentvideo */ "./node_modules/twilio-video/es5/util/detectsilentvideo.js");
 var mixinLocalMediaTrack = __webpack_require__(/*! ./localmediatrack */ "./node_modules/twilio-video/es5/media/track/localmediatrack.js");
 var VideoTrack = __webpack_require__(/*! ./videotrack */ "./node_modules/twilio-video/es5/media/track/videotrack.js");
 
@@ -45409,6 +46366,9 @@ var LocalMediaVideoTrack = mixinLocalMediaTrack(VideoTrack);
  * @property {Track.ID} id - The {@link LocalVideoTrack}'s ID
  * @property {boolean} isStopped - Whether or not the {@link LocalVideoTrack} is
  *   stopped
+ * @emits LocalVideoTrack#disabled
+ * @emits LocalVideoTrack#enabled
+ * @emits LocalVideoTrack#started
  * @emits LocalVideoTrack#stopped
  */
 
@@ -45423,7 +46383,29 @@ var LocalVideoTrack = function (_LocalMediaVideoTrack) {
   function LocalVideoTrack(mediaStreamTrack, options) {
     _classCallCheck(this, LocalVideoTrack);
 
-    return _possibleConstructorReturn(this, (LocalVideoTrack.__proto__ || Object.getPrototypeOf(LocalVideoTrack)).call(this, mediaStreamTrack, options));
+    options = Object.assign({
+      workaroundSilentLocalVideo: guessBrowser() === 'safari' && typeof document !== 'undefined' && typeof document.createElement === 'function'
+    }, options);
+
+    var _this = _possibleConstructorReturn(this, (LocalVideoTrack.__proto__ || Object.getPrototypeOf(LocalVideoTrack)).call(this, mediaStreamTrack, options));
+
+    Object.defineProperties(_this, {
+      _workaroundSilentLocalVideo: {
+        value: options.workaroundSilentLocalVideo ? workaroundSilentLocalVideo : null
+      },
+      _workaroundSilentLocalVideoCleanup: {
+        value: null,
+        writable: true
+      }
+    });
+
+    // NOTE(mmalavalli): In iOS Safari, we work around a bug where local video
+    // MediaStreamTracks are silent (even though they are enabled, live and unmuted)
+    // after accepting/rejecting a phone call.
+    if (_this._workaroundSilentLocalVideo) {
+      _this._workaroundSilentLocalVideoCleanup = _this._workaroundSilentLocalVideo(_this, document);
+    }
+    return _this;
   }
 
   _createClass(LocalVideoTrack, [{
@@ -45475,6 +46457,60 @@ var LocalVideoTrack = function (_LocalMediaVideoTrack) {
     }
 
     /**
+     * Restart the {@link LocalVideoTrack}. This stops the existing MediaStreamTrack
+     * and creates a new MediaStreamTrack. If the {@link LocalVideoTrack} is being published
+     * to a {@link Room}, then all the {@link RemoteParticipant}s will start receiving media
+     * from the newly created MediaStreamTrack. You can access the new MediaStreamTrack via
+     * the <code>mediaStreamTrack</code> property. If you want to listen to events on
+     * the MediaStreamTrack directly, please do so in the "started" event handler. Also,
+     * the {@link LocalVideoTrack}'s ID is no longer guaranteed to be the same as the
+     * underlying MediaStreamTrack's ID.
+     * @param {MediaTrackConstraints} [constraints] - The optional <a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaTrackConstraints" target="_blank">MediaTrackConstraints</a>
+     *   for restarting the {@link LocalVideoTrack}; If not specified, then the current MediaTrackConstraints
+     *   will be used; If <code>{}</code> (empty object) is specified, then the default MediaTrackConstraints
+     *   will be used
+     * @returns {Promise<void>} Rejects with a TypeError if the {@link LocalVideoTrack} was not created
+     *   using an one of <code>createLocalVideoTrack</code>, <code>createLocalTracks</code> or <code>connect</code>;
+     *   Also rejects with the <a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia#Exceptions" target="_blank">DOMException</a>
+     *   raised by <code>getUserMedia</code> when it fails
+     * @fires LocalVideoTrack#stopped
+     * @fires LocalVideoTrack#started
+     * @example
+     * const { connect, createLocalVideoTrack } = require('twilio-video');
+     *
+     * // Create a LocalVideoTrack that captures video from the front-facing camera.
+     * createLocalVideoTrack({ facingMode: 'user' }).then(function(localVideoTrack) {
+     *   return connect('token', {
+     *     name: 'my-cool-room',
+     *     tracks: [localVideoTrack]
+     *   });
+     * }).then(function(room) {
+     *   // Restart the LocalVideoTrack to capture video from the back-facing camera.
+     *   const localVideoTrack = Array.from(room.localParticipant.videoTracks.values())[0].track;
+     *   return localVideoTrack.restart({ facingMode: 'environment' });
+     * });
+     */
+
+  }, {
+    key: 'restart',
+    value: function restart() {
+      var _this2 = this;
+
+      if (this._workaroundSilentLocalVideoCleanup) {
+        this._workaroundSilentLocalVideoCleanup();
+        this._workaroundSilentLocalVideoCleanup = null;
+      }
+      var promise = _get(LocalVideoTrack.prototype.__proto__ || Object.getPrototypeOf(LocalVideoTrack.prototype), 'restart', this).apply(this, arguments);
+
+      if (this._workaroundSilentLocalVideo) {
+        promise.finally(function () {
+          _this2._workaroundSilentLocalVideoCleanup = _this2._workaroundSilentLocalVideo(_this2, document);
+        });
+      }
+      return promise;
+    }
+
+    /**
      * Calls stop on the underlying MediaStreamTrack. If you choose to stop a
      * {@link LocalVideoTrack}, you should unpublish it after stopping.
      * @returns {this}
@@ -45484,12 +46520,80 @@ var LocalVideoTrack = function (_LocalMediaVideoTrack) {
   }, {
     key: 'stop',
     value: function stop() {
+      if (this._workaroundSilentLocalVideoCleanup) {
+        this._workaroundSilentLocalVideoCleanup();
+        this._workaroundSilentLocalVideoCleanup = null;
+      }
       return _get(LocalVideoTrack.prototype.__proto__ || Object.getPrototypeOf(LocalVideoTrack.prototype), 'stop', this).apply(this, arguments);
     }
   }]);
 
   return LocalVideoTrack;
 }(LocalMediaVideoTrack);
+
+/**
+ * Work around a bug where local video MediaStreamTracks are silent (even though
+ * they are enabled, live and unmuted) after accepting/rejecting a phone call.
+ * @private
+ * @param {LocalVideoTrack} localVideoTrack
+ * @param {HTMLDocument} doc
+ * @returns {function} Cleans up listeners attached by the workaround
+ */
+
+
+function workaroundSilentLocalVideo(localVideoTrack, doc) {
+  var log = localVideoTrack._log;
+  var el = localVideoTrack._dummyEl,
+      mediaStreamTrack = localVideoTrack.mediaStreamTrack;
+
+
+  function onUnmute() {
+    if (!localVideoTrack.isEnabled) {
+      return;
+    }
+    log.info('Unmuted, checking silence');
+
+    // The dummy element is paused, so play it and then detect silence.
+    el.play().then(function () {
+      return detectSilentVideo(el, doc);
+    }).then(function (isSilent) {
+      if (!isSilent) {
+        log.info('Non-silent frames detected, so no need to restart');
+        return;
+      }
+      log.warn('Silence detected, restarting');
+
+      // NOTE(mmalavalli): If we try and restart a silent MediaStreamTrack
+      // without stopping it first, then a NotReadableError is raised. Hence,
+      // we stop the MediaStreamTrack here.
+      localVideoTrack._stop();
+
+      // Restart the LocalVideoTrack.
+      // eslint-disable-next-line consistent-return
+      return localVideoTrack._restart();
+    }).catch(function (error) {
+      log.warn('Failed to detect silence and restart:', error);
+    }).finally(function () {
+      // If silent frames were not detected, then pause the dummy element again.
+      el = localVideoTrack._dummyEl;
+      if (!el.paused) {
+        el.pause();
+      }
+
+      // Reset the unmute handler.
+      mediaStreamTrack.removeEventListener('unmute', onUnmute);
+      mediaStreamTrack = localVideoTrack.mediaStreamTrack;
+      mediaStreamTrack.addEventListener('unmute', onUnmute);
+    });
+  }
+
+  // Set the unmute handler.
+  mediaStreamTrack.addEventListener('unmute', onUnmute);
+
+  return function () {
+    mediaStreamTrack.removeEventListener('unmute', onUnmute);
+  };
+}
 
 /**
  * The {@link LocalVideoTrack} was disabled, i.e. "muted".
@@ -45512,9 +46616,9 @@ var LocalVideoTrack = function (_LocalMediaVideoTrack) {
  */
 
 /**
- * The {@link LocalVideoTrack} stopped, either because
- * {@link LocalVideoTrack#stop} was called or because the underlying
- * MediaStreamTrack ended).
+ * The {@link LocalVideoTrack} stopped, either because {@link LocalVideoTrack#stop}
+ * or {@link LocalVideoTrack#restart} was called or because the underlying
+ * MediaStreamTrack ended.
  * @param {LocalVideoTrack} track - The {@link LocalVideoTrack} that stopped
  * @event LocalVideoTrack#stopped
  */
@@ -45593,6 +46697,8 @@ module.exports = LocalVideoTrackPublication;
 "use strict";
 
 
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
@@ -45601,7 +46707,17 @@ function _possibleConstructorReturn(self, call) { if (!self) { throw new Referen
 
 function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
 
-var MediaStream = __webpack_require__(/*! @twilio/webrtc */ "./node_modules/@twilio/webrtc/lib/index.js").MediaStream;
+var _require = __webpack_require__(/*! @twilio/webrtc/lib/util */ "./node_modules/@twilio/webrtc/lib/util/index.js"),
+    guessBrowser = _require.guessBrowser;
+
+var _require2 = __webpack_require__(/*! @twilio/webrtc */ "./node_modules/@twilio/webrtc/lib/index.js"),
+    MediaStream = _require2.MediaStream;
+
+var _require3 = __webpack_require__(/*! ../../util */ "./node_modules/twilio-video/es5/util/index.js"),
+    waitForEvent = _require3.waitForEvent,
+    waitForSometime = _require3.waitForSometime;
+
+var localMediaRestartDeferreds = __webpack_require__(/*! ../../util/localmediarestartdeferreds */ "./node_modules/twilio-video/es5/util/localmediarestartdeferreds.js");
 var Track = __webpack_require__(/*! ./ */ "./node_modules/twilio-video/es5/media/track/index.js");
 
 /**
@@ -45633,6 +46749,10 @@ var MediaTrack = function (_Track) {
   function MediaTrack(mediaTrackTransceiver, options) {
     _classCallCheck(this, MediaTrack);
 
+    options = Object.assign({
+      playPausedElementsIfNotBackgrounded: guessBrowser() === 'safari' && (typeof document === 'undefined' ? 'undefined' : _typeof(document)) === 'object' && typeof document.addEventListener === 'function' && typeof document.visibilityState === 'string'
+    }, options);
+
     var _this = _possibleConstructorReturn(this, (MediaTrack.__proto__ || Object.getPrototypeOf(MediaTrack)).call(this, mediaTrackTransceiver.id, mediaTrackTransceiver.kind, options));
 
     var isStarted = false;
@@ -45650,6 +46770,9 @@ var MediaTrack = function (_Track) {
         value: null,
         writable: true
       },
+      _elShims: {
+        value: new WeakMap()
+      },
       _isStarted: {
         get: function get() {
           return isStarted;
@@ -45657,6 +46780,12 @@ var MediaTrack = function (_Track) {
         set: function set(_isStarted) {
           isStarted = _isStarted;
         }
+      },
+      _playPausedElementsIfNotBackgrounded: {
+        value: options.playPausedElementsIfNotBackgrounded
+      },
+      _shouldShimAttachedElements: {
+        value: options.workaroundWebKitBug212780 || options.playPausedElementsIfNotBackgrounded
       },
       _MediaStream: {
         value: options.MediaStream
@@ -45669,7 +46798,9 @@ var MediaTrack = function (_Track) {
       },
       mediaStreamTrack: {
         enumerable: true,
-        value: mediaTrackTransceiver.track
+        get: function get() {
+          return mediaTrackTransceiver.track;
+        }
       }
     });
 
@@ -45735,6 +46866,8 @@ var MediaTrack = function (_Track) {
   }, {
     key: 'attach',
     value: function attach(el) {
+      var _this2 = this;
+
       if (typeof el === 'string') {
         el = this._selectElement(el);
       } else if (!el) {
@@ -45742,6 +46875,13 @@ var MediaTrack = function (_Track) {
       }
       this._log.debug('Attempting to attach to element:', el);
       el = this._attach(el);
+
+      if (this._shouldShimAttachedElements && !this._elShims.has(el)) {
+        var onUnintentionallyPaused = this._playPausedElementsIfNotBackgrounded ? function () {
+          return playIfPausedAndNotBackgrounded(el, _this2._log);
+        } : null;
+        this._elShims.set(el, shimMediaElement(el, onUnintentionallyPaused));
+      }
 
       return el;
     }
@@ -45765,11 +46905,8 @@ var MediaTrack = function (_Track) {
       });
       mediaStream.addTrack(this.mediaStreamTrack);
 
-      // NOTE(mroberts): Although we don't necessarily need to reset `srcObject`,
-      // we've been doing it here for a while, and it turns out it has allowed us
-      // to sidestep the following issue:
-      //
-      //   https://bugs.chromium.org/p/chromium/issues/detail?id=720258
+      // NOTE(mpatwardhan): resetting `srcObject` here, causes flicker (JSDK-2641), but it lets us
+      // to sidestep the a chrome bug: https://bugs.chromium.org/p/chromium/issues/detail?id=1052353
       //
       el.srcObject = mediaStream;
       el.autoplay = true;
@@ -45852,6 +46989,13 @@ var MediaTrack = function (_Track) {
       }
 
       this._attachments.delete(el);
+
+      if (this._shouldShimAttachedElements && this._elShims.has(el)) {
+        var shim = this._elShims.get(el);
+        shim.unShim();
+        this._elShims.delete(el);
+      }
+
       return el;
     }
 
@@ -45874,6 +47018,92 @@ var MediaTrack = function (_Track) {
 
   return MediaTrack;
 }(Track);
+
+/**
+ * Play an HTMLMediaElement if it is paused and not backgrounded.
+ * @private
+ * @param {HTMLMediaElement} el
+ * @param {Log} log
+ * @returns {void}
+ */
+
+
+function playIfPausedAndNotBackgrounded(el, log) {
+  var tag = el.tagName.toLowerCase();
+  log.warn('Unintentionally paused:', el);
+
+  // NOTE(mmalavalli): When the element is unintentionally paused, we wait one
+  // second for the "onvisibilitychange" event on the HTMLDocument to see if the
+  // app will be backgrounded. If not, then the element can be safely played.
+  Promise.race([waitForEvent(document, 'visibilitychange'), waitForSometime(1000)]).then(function () {
+    if (document.visibilityState === 'visible') {
+      // NOTE(mmalavalli): We play the inadvertently paused elements only after
+      // the LocalAudioTrack is unmuted to work around WebKit Bug 213853.
+      //
+      // Bug: https://bugs.webkit.org/show_bug.cgi?id=213853
+      //
+      localMediaRestartDeferreds.whenResolved('audio').then(function () {
+        log.info('Playing unintentionally paused <' + tag + '> element');
+        log.debug('Element:', el);
+        return el.play();
+      }).then(function () {
+        log.info('Successfully played unintentionally paused <' + tag + '> element');
+        log.debug('Element:', el);
+      }).catch(function (error) {
+        log.warn('Error while playing unintentionally paused <' + tag + '> element:', { error: error, el: el });
+      });
+    }
+  });
+}
+
+/**
+ * Shim the pause() and play() methods of the given HTMLMediaElement so that
+ * we can detect if it was paused unintentionally.
+ * @param {HTMLMediaElement} el
+ * @param {?function} [onUnintentionallyPaused=null]
+ * @returns {{pausedIntentionally: function, unShim: function}}
+ */
+function shimMediaElement(el) {
+  var onUnintentionallyPaused = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : null;
+
+  var origPause = el.pause;
+  var origPlay = el.play;
+
+  var _pausedIntentionally = false;
+
+  el.pause = function () {
+    _pausedIntentionally = true;
+    return origPause.call(el);
+  };
+
+  el.play = function () {
+    _pausedIntentionally = false;
+    return origPlay.call(el);
+  };
+
+  var onPause = onUnintentionallyPaused ? function () {
+    if (!_pausedIntentionally) {
+      onUnintentionallyPaused();
+    }
+  } : null;
+
+  if (onPause) {
+    el.addEventListener('pause', onPause);
+  }
+
+  return {
+    pausedIntentionally: function pausedIntentionally() {
+      return _pausedIntentionally;
+    },
+    unShim: function unShim() {
+      el.pause = origPause;
+      el.play = origPlay;
+      if (onPause) {
+        el.removeEventListener('pause', onPause);
+      }
+    }
+  };
+}
 
 module.exports = MediaTrack;
 
@@ -45935,6 +47165,8 @@ module.exports = MediaTrackReceiver;
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
 
+var _get = function get(object, property, receiver) { if (object === null) object = Function.prototype; var desc = Object.getOwnPropertyDescriptor(object, property); if (desc === undefined) { var parent = Object.getPrototypeOf(object); if (parent === null) { return undefined; } else { return get(parent, property, receiver); } } else if ("value" in desc) { return desc.value; } else { var getter = desc.get; if (getter === undefined) { return undefined; } return getter.call(receiver); } };
+
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
 function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
@@ -45969,20 +47201,35 @@ var RemoteAudioTrack = function (_RemoteMediaAudioTrac) {
    * @param {Track.SID} sid - The {@link RemoteAudioTrack}'s SID
    * @param {MediaTrackReceiver} mediaTrackReceiver - An audio MediaStreamTrack container
    * @param {boolean} isEnabled - Whether the {@link RemoteAudioTrack} is enabled
+   * @param {boolean} isSwitchedOff - Whether the {@link RemoteAudioTrack} is switched off
    * @param {function(?Track.Priority): void} setPriority - Set or clear the subscribe
    *  {@link Track.Priority} of the {@link RemoteAudioTrack}
    * @param {{log: Log}} options - The {@link RemoteTrack} options
    */
-  function RemoteAudioTrack(sid, mediaTrackReceiver, isEnabled, setPriority, options) {
+  function RemoteAudioTrack(sid, mediaTrackReceiver, isEnabled, isSwitchedOff, setPriority, options) {
     _classCallCheck(this, RemoteAudioTrack);
 
-    return _possibleConstructorReturn(this, (RemoteAudioTrack.__proto__ || Object.getPrototypeOf(RemoteAudioTrack)).call(this, sid, mediaTrackReceiver, isEnabled, setPriority, options));
+    return _possibleConstructorReturn(this, (RemoteAudioTrack.__proto__ || Object.getPrototypeOf(RemoteAudioTrack)).call(this, sid, mediaTrackReceiver, isEnabled, isSwitchedOff, setPriority, options));
   }
 
   _createClass(RemoteAudioTrack, [{
     key: 'toString',
     value: function toString() {
       return '[RemoteAudioTrack #' + this._instanceId + ': ' + this.sid + ']';
+    }
+
+    /**
+     * Update the subscribe {@link Track.Priority} of the {@link RemoteAudioTrack}.
+     * @param {?Track.Priority} priority - the new subscribe {@link Track.Priority};
+     *   Currently setPriority has no effect on audio tracks.
+     * @returns {this}
+     * @throws {RangeError}
+     */
+
+  }, {
+    key: 'setPriority',
+    value: function setPriority(priority) {
+      return _get(RemoteAudioTrack.prototype.__proto__ || Object.getPrototypeOf(RemoteAudioTrack.prototype), 'setPriority', this).call(this, priority);
     }
   }]);
 
@@ -46409,6 +47656,8 @@ module.exports = RemoteDataTrackPublication;
 "use strict";
 
 
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
 
 var _get = function get(object, property, receiver) { if (object === null) object = Function.prototype; var desc = Object.getOwnPropertyDescriptor(object, property); if (desc === undefined) { var parent = Object.getPrototypeOf(object); if (parent === null) { return undefined; } else { return get(parent, property, receiver); } } else if ("value" in desc) { return desc.value; } else { var getter = desc.get; if (getter === undefined) { return undefined; } return getter.call(receiver); } };
@@ -46424,6 +47673,11 @@ function _inherits(subClass, superClass) { if (typeof superClass !== "function" 
 var _require = __webpack_require__(/*! ../../util/constants */ "./node_modules/twilio-video/es5/util/constants.js"),
     E = _require.typeErrors,
     trackPriority = _require.trackPriority;
+
+var _require2 = __webpack_require__(/*! @twilio/webrtc/lib/util */ "./node_modules/@twilio/webrtc/lib/util/index.js"),
+    guessBrowser = _require2.guessBrowser;
+
+var documentVisibilityMonitor = __webpack_require__(/*! ../../util/documentvisibilitymonitor.js */ "./node_modules/twilio-video/es5/util/documentvisibilitymonitor.js");
 
 function mixinRemoteMediaTrack(AudioOrVideoTrack) {
   /**
@@ -46446,12 +47700,20 @@ function mixinRemoteMediaTrack(AudioOrVideoTrack) {
      * @param {Track.SID} sid
      * @param {MediaTrackReceiver} mediaTrackReceiver
      * @param {boolean} isEnabled
+      @param {boolean} isSwitchedOff
      * @param {function(?Track.Priority): void} setPriority - Set or clear the subscribe
      *  {@link Track.Priority} of the {@link RemoteMediaTrack}
      * @param {{log: Log, name: ?string}} options
      */
-    function RemoteMediaTrack(sid, mediaTrackReceiver, isEnabled, setPriority, options) {
+    function RemoteMediaTrack(sid, mediaTrackReceiver, isEnabled, isSwitchedOff, setPriority, options) {
       _classCallCheck(this, RemoteMediaTrack);
+
+      options = Object.assign({
+        // NOTE(mpatwardhan): WebKit bug: 212780 sometimes causes the audio/video elements to stay paused when safari
+        // regains foreground. To workaround it, when safari gains foreground - we will play any elements that were
+        // playing before safari lost foreground.
+        workaroundWebKitBug212780: guessBrowser() === 'safari' && (typeof document === 'undefined' ? 'undefined' : _typeof(document)) === 'object' && typeof document.addEventListener === 'function' && typeof document.visibilityState === 'string'
+      }, options);
 
       var _this = _possibleConstructorReturn(this, (RemoteMediaTrack.__proto__ || Object.getPrototypeOf(RemoteMediaTrack)).call(this, mediaTrackReceiver, options));
 
@@ -46461,7 +47723,7 @@ function mixinRemoteMediaTrack(AudioOrVideoTrack) {
           writable: true
         },
         _isSwitchedOff: {
-          value: false,
+          value: isSwitchedOff,
           writable: true
         },
         _priority: {
@@ -46492,6 +47754,13 @@ function mixinRemoteMediaTrack(AudioOrVideoTrack) {
         sid: {
           enumerable: true,
           value: sid
+        },
+        _workaroundWebKitBug212780: {
+          value: options.workaroundWebKitBug212780
+        },
+        _workaroundWebKitBug212780Cleanup: {
+          value: null,
+          writable: true
         }
       });
       return _this;
@@ -46555,10 +47824,14 @@ function mixinRemoteMediaTrack(AudioOrVideoTrack) {
         var result = _get(RemoteMediaTrack.prototype.__proto__ || Object.getPrototypeOf(RemoteMediaTrack.prototype), 'attach', this).call(this, el);
         if (this.mediaStreamTrack.enabled !== true) {
           // NOTE(mpatwardhan): we disable mediaStreamTrack when there
-          // are no attchments to it (see notes below). Now that there
-          // are attachments reenable the track.
+          // are no attachments to it (see notes below). Now that there
+          // are attachments re-enable the track.
           this.mediaStreamTrack.enabled = true;
         }
+        if (this._workaroundWebKitBug212780) {
+          this._workaroundWebKitBug212780Cleanup = this._workaroundWebKitBug212780Cleanup || playIfPausedWhileInBackground(this);
+        }
+
         return result;
       }
     }, {
@@ -46572,6 +47845,12 @@ function mixinRemoteMediaTrack(AudioOrVideoTrack) {
           // to workaround: here disable the track when
           // there are no elements attached to it.
           this.mediaStreamTrack.enabled = false;
+
+          if (this._workaroundWebKitBug212780Cleanup) {
+            // unhook visibility change
+            this._workaroundWebKitBug212780Cleanup();
+            this._workaroundWebKitBug212780Cleanup = null;
+          }
         }
         return result;
       }
@@ -46579,6 +47858,40 @@ function mixinRemoteMediaTrack(AudioOrVideoTrack) {
 
     return RemoteMediaTrack;
   }(AudioOrVideoTrack);
+}
+
+function playIfPausedWhileInBackground(remoteMediaTrack) {
+  var log = remoteMediaTrack._log,
+      kind = remoteMediaTrack.kind;
+
+
+  function onVisibilityChanged() {
+    remoteMediaTrack._attachments.forEach(function (el) {
+      var shim = remoteMediaTrack._elShims.get(el);
+      var isInadvertentlyPaused = el.paused && shim && !shim.pausedIntentionally();
+      if (isInadvertentlyPaused) {
+        log.info('Playing inadvertently paused <' + kind + '> element');
+        log.debug('Element:', el);
+        log.debug('RemoteMediaTrack:', remoteMediaTrack);
+        el.play().then(function () {
+          log.info('Successfully played inadvertently paused <' + kind + '> element');
+          log.debug('Element:', el);
+          log.debug('RemoteMediaTrack:', remoteMediaTrack);
+        }).catch(function (err) {
+          log.warn('Error while playing inadvertently paused <' + kind + '> element:', { err: err, el: el, remoteMediaTrack: remoteMediaTrack });
+        });
+      }
+    });
+  }
+
+  // NOTE(mpatwardhan): listen for document visibility callback on phase 2.
+  // this ensures that any LocalMediaTrack's restart (which listen on phase 1) gets executed
+  // first. This order is important because we `play` tracks in the callback, and
+  // play can fail on safari if audio is not being captured.
+  documentVisibilityMonitor.onVisible(2, onVisibilityChanged);
+  return function () {
+    documentVisibilityMonitor.offVisible(2, onVisibilityChanged);
+  };
 }
 
 /**
@@ -46636,6 +47949,7 @@ var TrackPublication = __webpack_require__(/*! ./trackpublication */ "./node_mod
 /**
  * A {@link RemoteTrackPublication} represents a {@link RemoteTrack} that has
  * been published to a {@link Room}.
+ * @extends TrackPublication
  * @property {boolean} isSubscribed - whether the published {@link RemoteTrack}
  *   is subscribed to
  * @property {boolean} isTrackEnabled - whether the published
@@ -46729,10 +48043,13 @@ var RemoteTrackPublication = function (_TrackPublication) {
         _this.emit(signaling.isEnabled ? 'trackEnabled' : 'trackDisabled');
       }
       if (isSwitchedOff !== signaling.isSwitchedOff) {
+        _this._log.warn(_this.trackSid + ': ' + (isSwitchedOff ? 'OFF' : 'ON') + ' => ' + (signaling.isSwitchedOff ? 'OFF' : 'ON'));
         isSwitchedOff = signaling.isSwitchedOff;
         if (_this.track) {
           _this.track._setSwitchedOff(signaling.isSwitchedOff);
-          _this.emit(signaling.isSwitchedOff ? 'trackSwitchedOff' : 'trackSwitchedOn', _this.track);
+          _this.emit(isSwitchedOff ? 'trackSwitchedOff' : 'trackSwitchedOn', _this.track);
+        } else if (isSwitchedOff) {
+          _this._log.warn('Track was not subscribed when switched Off.');
         }
       }
       if (priority !== signaling.priority) {
@@ -46853,6 +48170,8 @@ module.exports = RemoteTrackPublication;
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
 
+var _get = function get(object, property, receiver) { if (object === null) object = Function.prototype; var desc = Object.getOwnPropertyDescriptor(object, property); if (desc === undefined) { var parent = Object.getPrototypeOf(object); if (parent === null) { return undefined; } else { return get(parent, property, receiver); } } else if ("value" in desc) { return desc.value; } else { var getter = desc.get; if (getter === undefined) { return undefined; } return getter.call(receiver); } };
+
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
 function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
@@ -46888,20 +48207,36 @@ var RemoteVideoTrack = function (_RemoteMediaVideoTrac) {
    * @param {Track.SID} sid - The {@link RemoteVideoTrack}'s SID
    * @param {MediaTrackReceiver} mediaTrackReceiver - A video MediaStreamTrack container
    * @param {boolean} isEnabled - whether the {@link RemoteVideoTrack} is enabled
+   * @param {boolean} isSwitchedOff - Whether the {@link RemoteVideoTrack} is switched off
    * @param {function(?Track.Priority): void} setPriority - Set or clear the subscribe
    *  {@link Track.Priority} of the {@link RemoteVideoTrack}
    * @param {{log: Log}} options - The {@link RemoteTrack} options
    */
-  function RemoteVideoTrack(sid, mediaTrackReceiver, isEnabled, setPriority, options) {
+  function RemoteVideoTrack(sid, mediaTrackReceiver, isEnabled, isSwitchedOff, setPriority, options) {
     _classCallCheck(this, RemoteVideoTrack);
 
-    return _possibleConstructorReturn(this, (RemoteVideoTrack.__proto__ || Object.getPrototypeOf(RemoteVideoTrack)).call(this, sid, mediaTrackReceiver, isEnabled, setPriority, options));
+    return _possibleConstructorReturn(this, (RemoteVideoTrack.__proto__ || Object.getPrototypeOf(RemoteVideoTrack)).call(this, sid, mediaTrackReceiver, isEnabled, isSwitchedOff, setPriority, options));
   }
 
   _createClass(RemoteVideoTrack, [{
     key: 'toString',
     value: function toString() {
       return '[RemoteVideoTrack #' + this._instanceId + ': ' + this.sid + ']';
+    }
+
+    /**
+     * Update the subscribe {@link Track.Priority} of the {@link RemoteVideoTrack}.
+     * @param {?Track.Priority} priority - the new subscribe {@link Track.Priority};
+     *   If <code>null</code>, then the subscribe {@link Track.Priority} is cleared, which
+     *   means the {@link Track.Priority} set by the publisher is now the effective priority.
+     * @returns {this}
+     * @throws {RangeError}
+     */
+
+  }, {
+    key: 'setPriority',
+    value: function setPriority(priority) {
+      return _get(RemoteVideoTrack.prototype.__proto__ || Object.getPrototypeOf(RemoteVideoTrack.prototype), 'setPriority', this).call(this, priority);
     }
   }]);
 
@@ -46923,7 +48258,7 @@ var RemoteVideoTrack = function (_RemoteMediaVideoTrac) {
  */
 
 /**
- * The {@link RemoteVideoTrack} was enabled, i.e. "unpaused".
+ * The {@link RemoteVideoTrack} was enabled, i.e. "resumed".
  * @param {RemoteVideoTrack} track - The {@link RemoteVideoTrack} that was
  *   enabled
  * @event RemoteVideoTrack#enabled
@@ -47083,6 +48418,9 @@ var MediaTrackSender = function (_MediaTrackTransceive) {
     var _this = _possibleConstructorReturn(this, (MediaTrackSender.__proto__ || Object.getPrototypeOf(MediaTrackSender)).call(this, mediaStreamTrack.id, mediaStreamTrack));
 
     Object.defineProperties(_this, {
+      _clones: {
+        value: new Set()
+      },
       _senders: {
         value: new Set()
       }
@@ -47100,7 +48438,42 @@ var MediaTrackSender = function (_MediaTrackTransceive) {
   _createClass(MediaTrackSender, [{
     key: 'clone',
     value: function clone() {
-      return new MediaTrackSender(this.track.clone());
+      var clone = new MediaTrackSender(this.track.clone());
+      this._clones.add(clone);
+      return clone;
+    }
+
+    /**
+     * Remove a cloned {@link MediaTrackSender}.
+     * @returns {void}
+     */
+
+  }, {
+    key: 'removeClone',
+    value: function removeClone(clone) {
+      this._clones.delete(clone);
+    }
+
+    /**
+     * Set the given MediaStreamTrack.
+     * @param {MediaStreamTrack} mediaStreamTrack
+     * @returns {Promise<void>}
+     */
+
+  }, {
+    key: 'setMediaStreamTrack',
+    value: function setMediaStreamTrack(mediaStreamTrack) {
+      var _this2 = this;
+
+      var clones = Array.from(this._clones);
+      var senders = Array.from(this._senders);
+      return Promise.all(clones.map(function (clone) {
+        return clone.setMediaStreamTrack(mediaStreamTrack.clone());
+      }).concat(senders.map(function (sender) {
+        return sender.replaceTrack(mediaStreamTrack);
+      }))).finally(function () {
+        _this2._track = mediaStreamTrack;
+      });
     }
 
     /**
@@ -47201,7 +48574,7 @@ var TrackPublication = function (_EventEmitter) {
         value: nInstances++
       },
       _log: {
-        value: options.log || new Log('default', _this, logLevels)
+        value: options.log ? options.log.createLog('default', _this) : new Log('default', _this, logLevels, options.loggerName)
       },
       trackName: {
         enumerable: true,
@@ -47308,15 +48681,27 @@ var MediaTrackTransceiver = function (_TrackTransceiver) {
     var _this = _possibleConstructorReturn(this, (MediaTrackTransceiver.__proto__ || Object.getPrototypeOf(MediaTrackTransceiver)).call(this, id, mediaStreamTrack.kind));
 
     Object.defineProperties(_this, {
+      _track: {
+        value: mediaStreamTrack,
+        writable: true
+      },
+      enabled: {
+        enumerable: true,
+        get: function get() {
+          return this._track.enabled;
+        }
+      },
       readyState: {
         enumerable: true,
         get: function get() {
-          return mediaStreamTrack.readyState;
+          return this._track.readyState;
         }
       },
       track: {
         enumerable: true,
-        value: mediaStreamTrack
+        get: function get() {
+          return this._track;
+        }
       }
     });
     return _this;
@@ -47754,13 +49139,15 @@ var nInstances = 0;
  * @property {?NetworkQualityStats} networkQualityStats - The
  *    {@link Participant}'s current {@link NetworkQualityStats}, if any
  * @property {Participant.SID} sid - The {@link Participant}'s SID
- * @property {string} state - "connected", "disconnected" or "failed"
+ * @property {string} state - "connected", "disconnected" or "reconnecting"
  * @property {Map<Track.SID, TrackPublication>} tracks -
  *    The {@link Participant}'s {@link TrackPublication}s
  * @property {Map<Track.SID, VideoTrackPublication>} videoTracks -
  *    The {@link Participant}'s {@link VideoTrackPublication}s
  * @emits Participant#disconnected
  * @emits Participant#networkQualityLevelChanged
+ * @emits Participant#reconnected
+ * @emits Participant#reconnecting
  * @emits Participant#trackDimensionsChanged
  * @emits Participant#trackStarted
  */
@@ -48057,7 +49444,8 @@ var Participant = function (_EventEmitter) {
             name = signaling.name,
             kind = signaling.kind,
             sid = signaling.sid,
-            trackTransceiver = signaling.trackTransceiver;
+            trackTransceiver = signaling.trackTransceiver,
+            isSwitchedOff = signaling.isSwitchedOff;
 
         var RemoteTrack = {
           audio: RemoteAudioTrack,
@@ -48078,7 +49466,7 @@ var Participant = function (_EventEmitter) {
         var setPriority = function setPriority(newPriority) {
           return participantSignaling.updateSubscriberTrackPriority(sid, newPriority);
         };
-        var track = kind === 'data' ? new RemoteTrack(sid, trackTransceiver, options) : new RemoteTrack(sid, trackTransceiver, isEnabled, setPriority, options);
+        var track = kind === 'data' ? new RemoteTrack(sid, trackTransceiver, options) : new RemoteTrack(sid, trackTransceiver, isEnabled, isSwitchedOff, setPriority, options);
 
         self._addTrack(track, publication, trackTransceiver.id);
       }
@@ -48111,6 +49499,17 @@ var Participant = function (_EventEmitter) {
           participantSignaling.removeListener('stateChanged', stateChanged);
           participantSignaling.removeListener('trackAdded', trackSignalingAdded);
           participantSignaling.removeListener('trackRemoved', trackSignalingRemoved);
+        } else if (state === 'connected') {
+          // NOTE(mmalavalli): Any transition to "connected" here is a result of
+          // successful signaling reconnection, and not a first-time establishment
+          // of the signaling connection.
+          log.info('reconnected');
+
+          // NOTE(mpatwardhan): `stateChanged` can get emitted with StateMachine locked.
+          // Do not signal  public events synchronously with lock held.
+          setTimeout(function () {
+            return self.emit('reconnected');
+          }, 0);
         }
       });
     }
@@ -48219,6 +49618,16 @@ var Participant = function (_EventEmitter) {
  */
 
 /**
+ * The {@link Participant} has reconnected to the {@link Room} after a signaling connection disruption.
+ * @event Participant#reconnected
+ */
+
+/**
+ * The {@link Participant} is reconnecting to the {@link Room} after a signaling connection disruption.
+ * @event Participant#reconnecting
+ */
+
+/**
  * One of the {@link Participant}'s {@link VideoTrack}'s dimensions changed.
  * @param {VideoTrack} track - The {@link VideoTrack} whose dimensions changed
  * @event Participant#trackDimensionsChanged
@@ -48294,6 +49703,17 @@ function reemitSignalingStateChangedEvents(participant, signaling) {
       log.debug('Removing Track event reemitters');
       signaling.removeListener('stateChanged', stateChanged);
 
+      participant._tracks.forEach(function (track) {
+        var reemitters = participant._trackEventReemitters.get(track.id);
+        if (track && reemitters) {
+          reemitters.forEach(function (reemitter, event) {
+            track.removeListener(event, reemitter);
+          });
+        }
+      });
+
+      // TODO(joma): Removing this introduced unit test failures in the RemoteParticipant.
+      // Investigate further before removing.
       signaling.tracks.forEach(function (trackSignaling) {
         var track = participant._tracks.get(trackSignaling.id);
         var reemitters = participant._trackEventReemitters.get(trackSignaling.id);
@@ -48303,6 +49723,7 @@ function reemitSignalingStateChangedEvents(participant, signaling) {
           });
         }
       });
+
       participant._trackEventReemitters.clear();
 
       participant.tracks.forEach(function (publication) {
@@ -48521,6 +49942,8 @@ var Participant = __webpack_require__(/*! ./participant */ "./node_modules/twili
  *    The {@link Participant}'s {@link RemoteTrackPublication}s
  * @property {Map<Track.SID, RemoteVideoTrackPublication>} videoTracks -
  *    The {@link Participant}'s {@link RemoteVideoTrackPublication}s
+ * @emits RemoteParticipant#reconnected
+ * @emits RemoteParticipant#reconnecting
  * @emits RemoteParticipant#trackDimensionsChanged
  * @emits RemoteParticipant#trackDisabled
  * @emits RemoteParticipant#trackEnabled
@@ -48667,6 +50090,16 @@ var RemoteParticipant = function (_Participant) {
 }(Participant);
 
 /**
+ * The {@link RemoteParticipant} has reconnected to the {@link Room} after a signaling connection disruption.
+ * @event RemoteParticipant#reconnected
+ */
+
+/**
+ * The {@link RemoteParticipant} is reconnecting to the {@link Room} after a signaling connection disruption.
+ * @event RemoteParticipant#reconnecting
+ */
+
+/**
  * One of the {@link RemoteParticipant}'s {@link RemoteVideoTrack}'s dimensions changed.
  * @param {RemoteVideoTrack} track - The {@link RemoteVideoTrack} whose dimensions changed
  * @event RemoteParticipant#trackDimensionsChanged
@@ -48674,13 +50107,13 @@ var RemoteParticipant = function (_Participant) {
 
 /**
  * A {@link RemoteTrack} was disabled by the {@link RemoteParticipant}.
- * @param {RemoteTrack} track - The {@link RemoteTrack} that was disabled
+ * @param {RemoteTrackPublication} publication - The {@link RemoteTrackPublication} associated with the disabled {@link RemoteTrack}
  * @event RemoteParticipant#trackDisabled
  */
 
 /**
  * A {@link RemoteTrack} was enabled by the {@link RemoteParticipant}.
- * @param {RemoteTrack} track - The {@link RemoteTrack} that was enabled
+ * @param {RemoteTrackPublication} publication - The {@link RemoteTrackPublication} associated with the enabled {@link RemoteTrack}
  * @event RemoteParticipant#trackEnabled
  */
 
@@ -48784,69 +50217,6 @@ module.exports = RemoteParticipant;
 
 /***/ }),
 
-/***/ "./node_modules/twilio-video/es5/request.js":
-/*!**************************************************!*\
-  !*** ./node_modules/twilio-video/es5/request.js ***!
-  \**************************************************/
-/*! no static exports found */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var XHR = __webpack_require__(/*! xmlhttprequest */ "./node_modules/twilio-video/src/xmlhttprequest.js").XMLHttpRequest;
-
-/**
- * Make a network request.
- * @param {String} method - HTTP method to use. e.g: GET, POST.
- * @param {RequestParams} params
- * @returns {Promise<String>} responseText
-*/ /**
-   * @typedef {Object} RequestParams
-   * @property {String} url - URL to access.
-   * @property {Object} [headers] - An unformatted map of headers.
-   * @property {Object} [body] - An unformatted map representing
-   *   post body.
-   * @property {Boolean} [withCredentials=false] - Whether to set the
-   *   XHR withCredentials flag.
-   */
-function request(method, params) {
-  return new Promise(function (resolve, reject) {
-    if (typeof method !== 'string' || !params) {
-      throw new Error('<String>method and <Object>params are required args.');
-    }
-
-    var xhr = new XHR();
-    xhr.open(method.toUpperCase(), params.url, true);
-    xhr.withCredentials = !!params.withCredentials;
-
-    xhr.onreadystatechange = function onreadystatechange() {
-      if (xhr.readyState !== 4) {
-        return;
-      }
-
-      if (200 <= xhr.status && xhr.status < 300) {
-        resolve(xhr.responseText);
-      } else {
-        reject(xhr.responseText);
-      }
-    };
-
-    for (var headerName in params.headers) {
-      xhr.setRequestHeader(headerName, params.headers[headerName]);
-    }
-
-    xhr.send(params.body);
-  });
-}
-
-request.get = request.bind(null, 'GET');
-request.post = request.bind(null, 'POST');
-
-module.exports = request;
-
-/***/ }),
-
 /***/ "./node_modules/twilio-video/es5/room.js":
 /*!***********************************************!*\
   !*** ./node_modules/twilio-video/es5/room.js ***!
@@ -48883,7 +50253,7 @@ var nInstances = 0;
  * {@link RemoteParticipant}s sharing {@link AudioTrack}s and
  * {@link VideoTrack}s.
  * <br><br>
- * You can connect to a {@link Room} by calling {@link connect}.
+ * You can connect to a {@link Room} by calling {@link module:twilio-video.connect}.
  * @extends EventEmitter
  * @property {?RemoteParticipant} dominantSpeaker - The Dominant Speaker in the
  *   {@link Room}, if any
@@ -48891,6 +50261,8 @@ var nInstances = 0;
  *   recorded
  * @property {LocalParticipant} localParticipant - Your {@link LocalParticipant}
  *   in the {@link Room}
+ * @property {string} mediaRegion - String indicating geographical region
+ *    where  media is processed for the {@link Room}.
  * @property {string} name - The {@link Room}'s name
  * @property {Map<Participant.SID, RemoteParticipant>} participants -
  *   The {@link RemoteParticipant}s participating in this {@link Room}
@@ -48900,6 +50272,8 @@ var nInstances = 0;
  * @emits Room#disconnected
  * @emits Room#participantConnected
  * @emits Room#participantDisconnected
+ * @emits Room#participantReconnected
+ * @emits Room#participantReconnecting
  * @emits Room#reconnected
  * @emits Room#reconnecting
  * @emits Room#recordingStarted
@@ -48984,6 +50358,10 @@ var Room = function (_EventEmitter) {
         get: function get() {
           return signaling.state;
         }
+      },
+      mediaRegion: {
+        enumerable: true,
+        value: signaling.mediaRegion
       }
     });
 
@@ -49095,7 +50473,9 @@ function rewriteLocalTrackIds(room, trackStats) {
  */
 
 /**
- * A {@link RemoteParticipant} joined the {@link Room}.
+ * A {@link RemoteParticipant} joined the {@link Room}. In Large Group Rooms (Maximum
+ * Participants greater than 50), this event is raised only when a {@link RemoteParticipant}
+ * publishes at least one {@link LocalTrack}.
  * @param {RemoteParticipant} participant - The {@link RemoteParticipant} who joined
  * @event Room#participantConnected
  * @example
@@ -49105,7 +50485,9 @@ function rewriteLocalTrackIds(room, trackStats) {
  */
 
 /**
- * A {@link RemoteParticipant} left the {@link Room}.
+ * A {@link RemoteParticipant} left the {@link Room}. In Large Group Rooms (Maximum
+ * Participants greater than 50), this event is raised only when a {@link RemoteParticipant}
+ * unpublishes all its {@link LocalTrack}s.
  * @param {RemoteParticipant} participant - The {@link RemoteParticipant} who left
  * @event Room#participantDisconnected
  * @example
@@ -49116,6 +50498,26 @@ function rewriteLocalTrackIds(room, trackStats) {
  *       mediaElement.remove();
  *     });
  *   });
+ * });
+ */
+
+/**
+ * A {@link RemoteParticipant} has reconnected to the {@link Room} after a signaling connection disruption.
+ * @param {RemoteParticipant} participant - The {@link RemoteParticipant} that has reconnected.
+ * @event Room#participantReconnected
+ * @example
+ * myRoom.on('participantReconnected', participant => {
+ *   console.log(participant.identity + ' reconnected to the Room');
+ * });
+ */
+
+/**
+ * A {@link RemoteParticipant} is reconnecting to the {@link Room} after a signaling connection disruption.
+ * @param {RemoteParticipant} participant - The {@link RemoteParticipant} that is reconnecting.
+ * @event Room#participantReconnecting
+ * @example
+ * myRoom.on('participantReconnecting', participant => {
+ *   console.log(participant.identity + ' is reconnecting to the Room');
  * });
  */
 
@@ -49169,7 +50571,7 @@ function rewriteLocalTrackIds(room, trackStats) {
 
 /**
  * A {@link RemoteTrack} was disabled by a {@link RemoteParticipant} in the {@link Room}.
- * @param {RemoteTrack} track - The {@link RemoteTrack} that was disabled
+ * @param {RemoteTrackPublication} publication - The {@link RemoteTrackPublication} that represents disabled {@link RemoteTrack}
  * @param {RemoteParticipant} participant - The {@link RemoteParticipant} who
  *   disabled the {@link RemoteTrack}
  * @event Room#trackDisabled
@@ -49177,7 +50579,7 @@ function rewriteLocalTrackIds(room, trackStats) {
 
 /**
  * A {@link RemoteTrack} was enabled by a {@link RemoteParticipant} in the {@link Room}.
- * @param {RemoteTrack} track - The {@link RemoteTrack} that was enabled
+ * @param {RemoteTrackPublication} publication - The {@link RemoteTrackPublication} that represents enabled {@link RemoteTrack}
  * @param {RemoteParticipant} participant - The {@link RemoteParticipant} who
  *   enabled the {@link RemoteTrack}
  * @event Room#trackEnabled
@@ -49187,7 +50589,7 @@ function rewriteLocalTrackIds(room, trackStats) {
  * A message was received over one of the {@link RemoteParticipant}'s
  * {@link RemoteDataTrack}'s.
  * @param {string|ArrayBuffer} data
- * @param {RemoteVideoTrack} track - The {@link RemoteDataTrack} over which the
+ * @param {RemoteDataTrack} track - The {@link RemoteDataTrack} over which the
  *   message was received
  * @param {RemoteParticipant} participant - The {@link RemoteParticipant} whose
  *   {@link RemoteDataTrack} received the message
@@ -49318,11 +50720,16 @@ function connectParticipant(room, participantSignaling) {
   room._participants.set(participant.sid, participant);
   room.emit('participantConnected', participant);
 
-  // Reemit Track events from the RemoteParticipant.
-  var eventListeners = ['trackDimensionsChanged', 'trackDisabled', 'trackEnabled', 'trackMessage', 'trackPublished', 'trackPublishPriorityChanged', 'trackStarted', 'trackSubscribed', 'trackSubscriptionFailed', 'trackSwitchedOff', 'trackSwitchedOn', 'trackUnpublished', 'trackUnsubscribed'].map(function (event) {
+  // Reemit Track and RemoteParticipant events.
+  var eventListeners = [['reconnected', 'participantReconnected'], ['reconnecting', 'participantReconnecting'], 'trackDimensionsChanged', 'trackDisabled', 'trackEnabled', 'trackMessage', 'trackPublished', 'trackPublishPriorityChanged', 'trackStarted', 'trackSubscribed', 'trackSubscriptionFailed', 'trackSwitchedOff', 'trackSwitchedOn', 'trackUnpublished', 'trackUnsubscribed'].map(function (eventOrPair) {
+    var _ref3 = Array.isArray(eventOrPair) ? eventOrPair : [eventOrPair, eventOrPair],
+        _ref4 = _slicedToArray(_ref3, 2),
+        event = _ref4[0],
+        participantEvent = _ref4[1];
+
     function reemit() {
       var args = [].slice.call(arguments);
-      args.unshift(event);
+      args.unshift(participantEvent);
       args.push(participant);
       room.emit.apply(room, _toConsumableArray(args));
     }
@@ -49330,7 +50737,6 @@ function connectParticipant(room, participantSignaling) {
     return [event, reemit];
   });
 
-  // Reemit state transition events from the RemoteParticipant.
   participant.once('disconnected', function participantDisconnected() {
     var dominantSpeaker = room.dominantSpeaker;
     log.info('RemoteParticipant disconnected:', participant);
@@ -49375,13 +50781,27 @@ function handleSignalingEvents(room, signaling) {
           participant._unsubscribeTracks();
         });
         room.emit(state, room, error);
+        room.localParticipant.tracks.forEach(function (publication) {
+          publication.unpublish();
+        });
         signaling.removeListener('stateChanged', stateChanged);
         break;
       case 'reconnecting':
-        room.emit('reconnecting', error);
+
+        // NOTE(mpatwardhan): `stateChanged` can get emitted with StateMachine locked.
+        // Do not signal  public events synchronously with lock held.
+        setTimeout(function () {
+          return room.emit('reconnecting', error);
+        }, 0);
+
         break;
       default:
-        room.emit('reconnected');
+
+        // NOTE(mpatwardhan): `stateChanged` can get emitted with StateMachine locked.
+        // Do not signal  public events synchronously with lock held.
+        setTimeout(function () {
+          return room.emit('reconnected');
+        }, 0);
     }
   });
 }
@@ -49480,7 +50900,7 @@ var Signaling = function (_StateMachine) {
 
   }, {
     key: '_connect',
-    value: function _connect(localParticipant, token, iceServerSource, encodingParameters, preferredCodecs, options) {
+    value: function _connect(localParticipant, token, encodingParameters, preferredCodecs, options) {
       localParticipant.connect('PA00000000000000000000000000000000', 'test');
       var sid = 'RM00000000000000000000000000000000';
       var promise = Promise.resolve(new RoomSignaling(localParticipant, sid, options));
@@ -49527,7 +50947,6 @@ var Signaling = function (_StateMachine) {
      * Connect to a {@link RoomSignaling}.
      * @param {ParticipantSignaling} localParticipant
      * @param {string} token
-     * @param {IceServerSource} iceServerSource
      * @param {EncodingParametersImpl} encodingParameters
      * @param {PreferredCodecs} preferredCodecs
      * @param {object} options
@@ -49536,7 +50955,7 @@ var Signaling = function (_StateMachine) {
 
   }, {
     key: 'connect',
-    value: function connect(localParticipant, token, iceServerSource, encodingParameters, preferredCodecs, options) {
+    value: function connect(localParticipant, token, encodingParameters, preferredCodecs, options) {
       var self = this;
       return this.bracket('connect', function transition(key) {
         switch (self.state) {
@@ -49546,7 +50965,7 @@ var Signaling = function (_StateMachine) {
             // NOTE(mroberts): We don't need to hold the lock in _connect. Instead,
             // we just need to ensure the Signaling remains open.
             self.releaseLockCompletely(key);
-            return self._connect(localParticipant, token, iceServerSource, encodingParameters, preferredCodecs, options);
+            return self._connect(localParticipant, token, encodingParameters, preferredCodecs, options);
           default:
             throw new Error('Unexpected Signaling state "' + self.state + '"');
         }
@@ -49903,12 +51322,18 @@ ParticipantSignaling States
     | connecting |---->| connected |---->| disconnected |
     |            |     |           |     |              |
     +------------+     +-----------+     +--------------+
-
+                           | ^                    ^
+                           | |  +--------------+  |
+                           | |--|              |  |
+                           |--->| reconnecting |--|
+                                |              |
+                                +--------------+
 */
 
 var states = {
   connecting: ['connected'],
-  connected: ['disconnected'],
+  connected: ['disconnected', 'reconnecting'],
+  reconnecting: ['connected', 'disconnected'],
   disconnected: []
 };
 
@@ -50085,7 +51510,6 @@ var ParticipantSignaling = function (_StateMachine) {
         this._enqueuedPriorityUpdates.forEach(function (priority, trackSid) {
           _this2._trackPrioritySignaling.sendTrackPriorityUpdate(trackSid, 'subscribe', priority);
         });
-
         // NOTE(mpatwardhan)- we intentionally do not clear _enqueuedPriorityUpdates,
         // this cache will be used to re-send the priorities in case of VMS-FailOver.
       }
@@ -50102,10 +51526,29 @@ var ParticipantSignaling = function (_StateMachine) {
   }, {
     key: 'connect',
     value: function connect(sid, identity) {
-      if (this.state === 'connecting') {
-        this._sid = sid;
-        this._identity = identity;
+      if (this.state === 'connecting' || this.state === 'reconnecting') {
+        if (!this._sid) {
+          this._sid = sid;
+        }
+        if (!this._identity) {
+          this._identity = identity;
+        }
         this.preempt('connected');
+        return true;
+      }
+      return false;
+    }
+
+    /**
+     * Transition to "reconnecting" state.
+     * @returns {boolean}
+     */
+
+  }, {
+    key: 'reconnecting',
+    value: function reconnecting() {
+      if (this.state === 'connecting' || this.state === 'connected') {
+        this.preempt('reconnecting');
         return true;
       }
       return false;
@@ -50330,15 +51773,16 @@ var RemoteTrackPublicationSignaling = function (_TrackSignaling) {
    * @param {Track.Kind} kind
    * @param {boolean} isEnabled
    * @param {Track.Priority} priority
+   * @param {boolean} isSwitchedOff
    */
-  function RemoteTrackPublicationSignaling(sid, name, kind, isEnabled, priority) {
+  function RemoteTrackPublicationSignaling(sid, name, kind, isEnabled, priority, isSwitchedOff) {
     _classCallCheck(this, RemoteTrackPublicationSignaling);
 
     var _this = _possibleConstructorReturn(this, (RemoteTrackPublicationSignaling.__proto__ || Object.getPrototypeOf(RemoteTrackPublicationSignaling)).call(this, name, kind, isEnabled, priority));
 
     Object.defineProperties(_this, {
       _isSwitchedOff: {
-        value: false,
+        value: isSwitchedOff,
         writable: true
       }
     });
@@ -50444,10 +51888,22 @@ function _inherits(subClass, superClass) { if (typeof superClass !== "function" 
 
 var DefaultRecordingSignaling = __webpack_require__(/*! ./recording */ "./node_modules/twilio-video/es5/signaling/recording.js");
 var StateMachine = __webpack_require__(/*! ../statemachine */ "./node_modules/twilio-video/es5/statemachine.js");
+var DefaultTimeout = __webpack_require__(/*! ../util/timeout */ "./node_modules/twilio-video/es5/util/timeout.js");
 
-var _require = __webpack_require__(/*! ../util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js"),
-    MediaConnectionError = _require.MediaConnectionError,
-    SignalingConnectionDisconnectedError = _require.SignalingConnectionDisconnectedError;
+var _require = __webpack_require__(/*! ../util */ "./node_modules/twilio-video/es5/util/index.js"),
+    buildLogLevels = _require.buildLogLevels;
+
+var _require2 = __webpack_require__(/*! ../util/constants */ "./node_modules/twilio-video/es5/util/constants.js"),
+    DEFAULT_LOG_LEVEL = _require2.DEFAULT_LOG_LEVEL;
+
+var Log = __webpack_require__(/*! ../util/log */ "./node_modules/twilio-video/es5/util/log.js");
+
+var _require3 = __webpack_require__(/*! ../util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js"),
+    MediaConnectionError = _require3.MediaConnectionError,
+    MediaDTLSTransportFailedError = _require3.MediaDTLSTransportFailedError,
+    SignalingConnectionDisconnectedError = _require3.SignalingConnectionDisconnectedError;
+
+var nInstances = 0;
 
 /*
 RoomSignaling States
@@ -50477,9 +51933,10 @@ var states = {
 /**
  * A {@link Room} implementation
  * @extends StateMachine
+ * @property {RTCPeerConnectionState} connectionState
  * @property {?Participant.SID} dominantSpeakerSid
  * @property {ParticipantSignaling} localParticipant
- * @property {RTCIceConnectionState} mediaConnectionState
+ * @property {RTCIceConnectionState} iceConnectionState
  * @property {string} name
  * @property {Map<string, RemoteParticipantSignaling>} participants
  * @property {RecordingSignaling} recording
@@ -50487,7 +51944,9 @@ var states = {
  * @property {string} state - "connected", "reconnecting", or "disconnected"
  * @property {string} signalingConnectionState - "connected",
  *   "reconnecting", or "disconnected"
- * @emits RoomSignaling#mediaConnectionStateChanged
+ * @emits RoomSignaling#connectionStateChanged
+ * @emits RoomSignaling#dominantSpeakerChanged
+ * @emits RoomSignaling#iceConnectionStateChanged
  * @emits RoomSignaling#signalingConnectionStateChanged
  */
 
@@ -50499,25 +51958,47 @@ var RoomSignaling = function (_StateMachine) {
    * @param {ParticipantSignaling} localParticipant
    * @param {Room.SID} sid
    * @param {string} name
+   * @param {object} options
    */
   function RoomSignaling(localParticipant, sid, name, options) {
     _classCallCheck(this, RoomSignaling);
 
     options = Object.assign({
-      RecordingSignaling: DefaultRecordingSignaling
+      logLevel: DEFAULT_LOG_LEVEL,
+      RecordingSignaling: DefaultRecordingSignaling,
+      Timeout: DefaultTimeout
     }, options);
+
+    var logLevels = buildLogLevels(options.logLevel);
 
     var _this = _possibleConstructorReturn(this, (RoomSignaling.__proto__ || Object.getPrototypeOf(RoomSignaling)).call(this, 'connected', states));
 
     var RecordingSignaling = options.RecordingSignaling;
 
+    var sessionTimeout = new options.Timeout(function () {
+      _this._disconnect(_this._reconnectingError);
+    }, options.sessionTimeout, false);
+
     Object.defineProperties(_this, {
+      _instanceId: {
+        value: nInstances++
+      },
+      _log: {
+        value: options.log ? options.log.createLog('default', _this) : new Log('default', _this, logLevels, options.loggerName)
+      },
       _mediaConnectionIsReconnecting: {
         writable: true,
         value: false
       },
       _options: {
         value: options
+      },
+      _reconnectingError: {
+        value: null,
+        writable: true
+      },
+      _sessionTimeout: {
+        value: sessionTimeout
       },
       dominantSpeakerSid: {
         enumerable: true,
@@ -50546,10 +52027,24 @@ var RoomSignaling = function (_StateMachine) {
       }
     });
 
-    _this.on('mediaConnectionStateChanged', function () {
+    _this.on('connectionStateChanged', function () {
+      if (_this.connectionState === 'failed' && !['disconnected', 'failed'].includes(_this.iceConnectionState)) {
+        _this._disconnect(new MediaDTLSTransportFailedError());
+      }
+    });
+
+    _this.on('iceConnectionStateChanged', function () {
       return maybeUpdateState(_this);
     });
     _this.on('signalingConnectionStateChanged', function () {
+      return maybeUpdateState(_this);
+    });
+
+    // NOTE(mmalavalli): In case "iceConnectionState" is already failed, update
+    // the RoomSignaling state. setTimeout() ensures that the state is updated
+    // after RoomV2's constructor is fully executed, thereby making "signalingConnectionState"
+    // available here.
+    setTimeout(function () {
       return maybeUpdateState(_this);
     });
     return _this;
@@ -50571,6 +52066,11 @@ var RoomSignaling = function (_StateMachine) {
         return true;
       }
       return false;
+    }
+  }, {
+    key: 'toString',
+    value: function toString() {
+      return '[RoomSignaling #' + this._instanceId + ']';
     }
 
     /**
@@ -50636,6 +52136,10 @@ var RoomSignaling = function (_StateMachine) {
 }(StateMachine);
 
 /**
+ * @event RoomSignaling#event:connectionStateChanged
+ */
+
+/**
  * @event RoomSignaling#event:dominantSpeakerChanged
  */
 
@@ -50652,7 +52156,7 @@ var RoomSignaling = function (_StateMachine) {
  */
 
 /**
- * @event RoomSignaling#event:mediaConnectionStateChanged
+ * @event RoomSignaling#event:iceConnectionStateChanged
  */
 
 /**
@@ -50667,6 +52171,7 @@ var RoomSignaling = function (_StateMachine) {
 
 function maybeUpdateState(roomSignaling) {
   if (roomSignaling.state === 'disconnected' || roomSignaling.signalingConnectionState === 'disconnected') {
+    roomSignaling._sessionTimeout.clear();
     return;
   }
 
@@ -50674,13 +52179,15 @@ function maybeUpdateState(roomSignaling) {
 
   if (roomSignaling.signalingConnectionState === 'reconnecting') {
     newState = roomSignaling.signalingConnectionState;
-  } else if (roomSignaling.mediaConnectionState === 'failed') {
+  } else if (roomSignaling.iceConnectionState === 'failed') {
     roomSignaling._mediaConnectionIsReconnecting = true;
     newState = 'reconnecting';
-  } else if (roomSignaling.mediaConnectionState === 'new' || roomSignaling.mediaConnectionState === 'checking') {
+  } else if (roomSignaling.iceConnectionState === 'new' || roomSignaling.iceConnectionState === 'checking') {
     newState = roomSignaling._mediaConnectionIsReconnecting ? 'reconnecting' : 'connected';
   } else {
     roomSignaling._mediaConnectionIsReconnecting = false;
+    roomSignaling._reconnectingError = null;
+    roomSignaling._sessionTimeout.clear();
     newState = 'connected';
   }
 
@@ -50689,7 +52196,9 @@ function maybeUpdateState(roomSignaling) {
   }
 
   if (newState === 'reconnecting') {
-    roomSignaling.preempt(newState, null, [roomSignaling.signalingConnectionState === 'reconnecting' ? new SignalingConnectionDisconnectedError() : new MediaConnectionError()]);
+    roomSignaling._reconnectingError = roomSignaling.signalingConnectionState === 'reconnecting' ? new SignalingConnectionDisconnectedError() : new MediaConnectionError();
+    roomSignaling._sessionTimeout.start();
+    roomSignaling.preempt(newState, null, [roomSignaling._reconnectingError]);
   } else {
     roomSignaling.preempt(newState);
   }
@@ -50928,121 +52437,158 @@ var CancelablePromise = __webpack_require__(/*! ../../util/cancelablepromise */ 
 var DefaultPeerConnectionManager = __webpack_require__(/*! ./peerconnectionmanager */ "./node_modules/twilio-video/es5/signaling/v2/peerconnectionmanager.js");
 var DefaultRoomV2 = __webpack_require__(/*! ./room */ "./node_modules/twilio-video/es5/signaling/v2/room.js");
 var DefaultTransport = __webpack_require__(/*! ./twilioconnectiontransport */ "./node_modules/twilio-video/es5/signaling/v2/twilioconnectiontransport.js");
-var SignalingConnectionDisconnectedError = __webpack_require__(/*! ../../util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js").SignalingConnectionDisconnectedError;
-var SignalingIncomingMessageInvalidError = __webpack_require__(/*! ../../util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js").SignalingIncomingMessageInvalidError;
-var flatMap = __webpack_require__(/*! ../../util */ "./node_modules/twilio-video/es5/util/index.js").flatMap;
 
-function createCancelableRoomSignalingPromise(token, wsServer, localParticipant, iceServerSource, encodingParameters, preferredCodecs, options) {
+var _require = __webpack_require__(/*! ../../util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js"),
+    SignalingConnectionDisconnectedError = _require.SignalingConnectionDisconnectedError,
+    SignalingIncomingMessageInvalidError = _require.SignalingIncomingMessageInvalidError;
+
+var _require2 = __webpack_require__(/*! ../../util */ "./node_modules/twilio-video/es5/util/index.js"),
+    flatMap = _require2.flatMap,
+    createRoomConnectEventPayload = _require2.createRoomConnectEventPayload;
+
+function createCancelableRoomSignalingPromise(token, wsServer, localParticipant, encodingParameters, preferredCodecs, options) {
   options = Object.assign({
     PeerConnectionManager: DefaultPeerConnectionManager,
     RoomV2: DefaultRoomV2,
     Transport: DefaultTransport
   }, options);
 
-  var transport = void 0;
+  var _options = options,
+      PeerConnectionManager = _options.PeerConnectionManager,
+      RoomV2 = _options.RoomV2,
+      Transport = _options.Transport,
+      iceServers = _options.iceServers,
+      log = _options.log;
 
-  var PeerConnectionManager = options.PeerConnectionManager;
-  var RoomV2 = options.RoomV2;
-
-  var peerConnectionManager = new PeerConnectionManager(iceServerSource, encodingParameters, preferredCodecs, options);
-
+  var peerConnectionManager = new PeerConnectionManager(encodingParameters, preferredCodecs, options);
   var trackSenders = flatMap(localParticipant.tracks, function (trackV2) {
     return [trackV2.trackTransceiver];
   });
-
-  peerConnectionManager.setConfiguration(options);
   peerConnectionManager.setTrackSenders(trackSenders);
 
-  var cancelationError = new Error('Canceled');
+  var cancellationError = new Error('Canceled');
 
-  return new CancelablePromise(function onCreate(resolve, reject, isCanceled) {
-    peerConnectionManager.createAndOffer().then(function createAndOfferSucceeded() {
-      // NOTE(mmalavalli): PeerConnectionManager#createAndOffer() queues the
-      // initial offer in the event queue for the 'description' event. So,
-      // we are dequeueing to prevent the spurious 'update' message sent by
-      // the client after connecting to a room.
-      peerConnectionManager.dequeue('description');
+  var transport = void 0;
 
-      return new Promise(function (resolve, reject) {
-        if (isCanceled()) {
-          reject(cancelationError);
-          return;
-        }
-
-        var transportOptions = typeof options.wsServerInsights === 'string' ? { wsServerInsights: options.wsServerInsights } : {};
-
-        if (options.InsightsPublisher) {
-          transportOptions.InsightsPublisher = options.InsightsPublisher;
-        }
-
-        if (options.NullInsightsPublisher) {
-          transportOptions.NullInsightsPublisher = options.NullInsightsPublisher;
-        }
-
-        if (options.bandwidthProfile) {
-          transportOptions.bandwidthProfile = options.bandwidthProfile;
-        }
-
-        transportOptions = Object.assign({
-          automaticSubscription: options.automaticSubscription,
-          dominantSpeaker: options.dominantSpeaker,
-          environment: options.environment,
-          logLevel: options.logLevel,
-          networkQuality: options.networkQuality,
-          iceServerSourceStatus: iceServerSource.status,
-          insights: options.insights,
-          realm: options.realm,
-          sdpSemantics: options.sdpSemantics
-        }, transportOptions);
-
-        var Transport = options.Transport;
-        transport = new Transport(options.name, token, localParticipant, peerConnectionManager, wsServer, transportOptions);
-
-        transport.once('connected', function connected(initialState) {
-          if (isCanceled()) {
-            reject(cancelationError);
-            return;
-          }
-
-          var localParticipantState = initialState.participant;
-          if (!localParticipantState) {
-            reject(new SignalingIncomingMessageInvalidError());
-            return;
-          }
-
-          resolve(new RoomV2(localParticipant, initialState, transport, peerConnectionManager, options));
-        });
-
-        transport.once('stateChanged', function stateChanged(state, error) {
-          if (state === 'disconnected') {
-            error = error || new SignalingConnectionDisconnectedError();
-            transport = null;
-            reject(error);
-          }
-        });
-      });
-    }).then(function createRoomSignalingSucceeded(roomSignaling) {
+  var cancelablePromise = new CancelablePromise(function (resolve, reject, isCanceled) {
+    var onIced = function onIced(iceServers) {
       if (isCanceled()) {
-        peerConnectionManager.close();
-        roomSignaling.disconnect();
-        reject(cancelationError);
+        reject(cancellationError);
+        return Promise.reject(cancellationError);
+      }
+      log.debug('Got ICE servers:', iceServers);
+      options.iceServers = iceServers;
+      peerConnectionManager.setConfiguration(options);
+
+      return peerConnectionManager.createAndOffer().then(function () {
+        if (isCanceled()) {
+          reject(cancellationError);
+          throw cancellationError;
+        }
+        log.debug('createAndOffer() succeeded.');
+        // NOTE(mmalavalli): PeerConnectionManager#createAndOffer() queues the
+        // initial offer in the event queue for the 'description' event. So,
+        // we are dequeueing to prevent the spurious 'update' message sent by
+        // the client after connecting to a room.
+        peerConnectionManager.dequeue('description');
+      }).catch(function (error) {
+        log.error('createAndOffer() failed:', error);
+        reject(error);
+        throw error;
+      });
+    };
+
+    var _options2 = options,
+        InsightsPublisher = _options2.InsightsPublisher,
+        NullInsightsPublisher = _options2.NullInsightsPublisher,
+        automaticSubscription = _options2.automaticSubscription,
+        bandwidthProfile = _options2.bandwidthProfile,
+        dominantSpeaker = _options2.dominantSpeaker,
+        environment = _options2.environment,
+        eventObserver = _options2.eventObserver,
+        loggerName = _options2.loggerName,
+        logLevel = _options2.logLevel,
+        name = _options2.name,
+        networkMonitor = _options2.networkMonitor,
+        networkQuality = _options2.networkQuality,
+        insights = _options2.insights,
+        realm = _options2.realm,
+        sdpSemantics = _options2.sdpSemantics,
+        wsServerInsights = _options2.wsServerInsights;
+
+
+    var transportOptions = Object.assign({
+      automaticSubscription: automaticSubscription,
+      dominantSpeaker: dominantSpeaker,
+      environment: environment,
+      eventObserver: eventObserver,
+      loggerName: loggerName,
+      logLevel: logLevel,
+      networkMonitor: networkMonitor,
+      networkQuality: networkQuality,
+      iceServers: iceServers,
+      insights: insights,
+      onIced: onIced,
+      realm: realm,
+      sdpSemantics: sdpSemantics
+    }, typeof wsServerInsights === 'string' ? {
+      wsServerInsights: wsServerInsights
+    } : {}, InsightsPublisher ? {
+      InsightsPublisher: InsightsPublisher
+    } : {}, NullInsightsPublisher ? {
+      NullInsightsPublisher: NullInsightsPublisher
+    } : {}, bandwidthProfile ? {
+      bandwidthProfile: bandwidthProfile
+    } : {});
+
+    transport = new Transport(name, token, localParticipant, peerConnectionManager, wsServer, transportOptions);
+
+    var connectEventPayload = createRoomConnectEventPayload(options);
+    eventObserver.emit('event', connectEventPayload);
+
+    transport.once('connected', function (initialState) {
+      log.debug('Transport connected:', initialState);
+      if (isCanceled()) {
+        reject(cancellationError);
         return;
       }
-      resolve(roomSignaling);
-    }).catch(function onError(error) {
-      if (transport) {
-        transport.disconnect();
-        transport = null;
+      var localParticipantState = initialState.participant;
+
+      if (!localParticipantState) {
+        reject(new SignalingIncomingMessageInvalidError());
+        return;
       }
-      peerConnectionManager.close();
-      reject(error);
+
+      var signalingRegion = initialState.options.signaling_region;
+
+      localParticipant.setSignalingRegion(signalingRegion);
+      resolve(new RoomV2(localParticipant, initialState, transport, peerConnectionManager, options));
     });
-  }, function onCancel() {
+
+    transport.once('stateChanged', function (state, error) {
+      if (state === 'disconnected') {
+        transport = null;
+        reject(error || new SignalingConnectionDisconnectedError());
+      } else {
+        log.debug('Transport state changed:', state);
+      }
+    });
+  }, function () {
     if (transport) {
       transport.disconnect();
       transport = null;
     }
   });
+
+  cancelablePromise.catch(function () {
+    if (transport) {
+      transport.disconnect();
+      transport = null;
+    }
+    peerConnectionManager.close();
+  });
+
+  return cancelablePromise;
 }
 
 module.exports = createCancelableRoomSignalingPromise;
@@ -51288,7 +52834,7 @@ var IceConnectionMonitor = function () {
       _inactivityThresholdMs: {
         value: options.inactivityThresholdMs
       },
-      _lastActiveStats: {
+      _lastActivity: {
         value: null,
         writable: true
       },
@@ -51298,26 +52844,79 @@ var IceConnectionMonitor = function () {
       _timer: {
         value: null,
         writable: true
+      },
+      _onIceConnectionStateChanged: {
+        value: null,
+        writable: true
       }
     });
   }
 
-  /**
-   * Get ICE connection stats, and extract received and send bytes.
-   * @returns Promise<?RTCIceCandidatePairStats>
-   */
-
-
   _createClass(IceConnectionMonitor, [{
+    key: '_getActivePairStat',
+    value: function _getActivePairStat(stats) {
+      var statsArray = Array.from(stats.values());
+      var hasInBoundTracks = statsArray.find(function (stat) {
+        return stat.type === 'inbound-rtp';
+      });
+      if (!hasInBoundTracks) {
+        // NOTE(mpatwardhan): when there are no tracks shared on a peerConnection
+        // we may see inactivity on bytesReceived - but that is not real inactivity,
+        // ignore it.
+        return null;
+      }
+
+      var activePairStats = statsArray.find(function (stat) {
+        return stat.type === 'candidate-pair' && stat.nominated;
+      });
+      // NOTE(mpatwardhan): sometimes (JSDK-2667) after getting disconnected while switching network
+      // we may not find active pair. Treat this as 0 bytesReceived so that we count it towards inactivity.
+      return activePairStats || {
+        bytesReceived: 0,
+        timestamp: Math.round(new Date().getTime())
+      };
+    }
+
+    /**
+     * Get ICE connection stats, and extract received and send bytes.
+     * @returns Promise<?RTCIceCandidatePairStats>
+     */
+
+  }, {
     key: '_getIceConnectionStats',
     value: function _getIceConnectionStats() {
+      var _this = this;
+
       return this._peerConnection.getStats().then(function (stats) {
-        return Array.from(stats.values()).find(function (stat) {
-          return stat.type === 'candidate-pair' && stat.nominated;
-        });
+        return _this._getActivePairStat(stats);
       }).catch(function () {
         return null;
       });
+    }
+
+    /**
+     * schedules/un-schedules inactivity callback.
+     */
+
+  }, {
+    key: '_scheduleInactivityCallback',
+    value: function _scheduleInactivityCallback(callback) {
+      var _this2 = this;
+
+      if (callback && this._onIceConnectionStateChanged === null) {
+        // schedule callback
+        this._onIceConnectionStateChanged = function () {
+          if (_this2._peerConnection.iceConnectionState === 'disconnected') {
+            // eslint-disable-next-line callback-return
+            callback();
+          }
+        };
+        this._peerConnection.addEventListener('iceconnectionstatechange', this._onIceConnectionStateChanged);
+      } else if (!callback && this._onIceConnectionStateChanged) {
+        // unschedule callback
+        this._peerConnection.removeEventListener('iceconnectionstatechange', this._onIceConnectionStateChanged);
+        this._onIceConnectionStateChanged = null;
+      }
     }
 
     /**
@@ -51330,21 +52929,29 @@ var IceConnectionMonitor = function () {
   }, {
     key: 'start',
     value: function start(onIceConnectionInactive) {
-      var _this = this;
+      var _this3 = this;
 
       this.stop();
+
       this._timer = setInterval(function () {
-        _this._getIceConnectionStats().then(function (iceStats) {
+        _this3._getIceConnectionStats().then(function (iceStats) {
           if (!iceStats) {
             return;
           }
 
-          if (!_this._lastActivity || _this._lastActivity.bytesReceived !== iceStats.bytesReceived) {
-            _this._lastActivity = iceStats;
+          if (!_this3._lastActivity || _this3._lastActivity.bytesReceived !== iceStats.bytesReceived) {
+            _this3._lastActivity = iceStats;
+            // detected activity, cancel scheduled callback if any.
+            _this3._scheduleInactivityCallback(null);
           }
 
-          if (iceStats.timestamp - _this._lastActivity.timestamp >= _this._inactivityThresholdMs) {
-            onIceConnectionInactive();
+          if (iceStats.timestamp - _this3._lastActivity.timestamp >= _this3._inactivityThresholdMs) {
+            // detected inactivity.
+            if (_this3._peerConnection.iceConnectionState === 'disconnected') {
+              onIceConnectionInactive();
+            } else if (_this3._onIceConnectionStateChanged === null) {
+              _this3._scheduleInactivityCallback(onIceConnectionInactive);
+            }
           }
         });
       }, this._activityCheckPeriodMs);
@@ -51358,6 +52965,7 @@ var IceConnectionMonitor = function () {
   }, {
     key: 'stop',
     value: function stop() {
+      this._scheduleInactivityCallback(null);
       if (this._timer !== null) {
         clearInterval(this._timer);
         this._timer = null;
@@ -51439,9 +53047,9 @@ var SignalingV2 = function (_Signaling) {
 
   _createClass(SignalingV2, [{
     key: '_connect',
-    value: function _connect(localParticipant, token, iceServerSource, encodingParameters, preferredCodecs, options) {
+    value: function _connect(localParticipant, token, encodingParameters, preferredCodecs, options) {
       options = Object.assign({}, this._options, options);
-      return this._createCancelableRoomSignalingPromise.bind(null, token, this._wsServer, localParticipant, iceServerSource, encodingParameters, preferredCodecs, options);
+      return this._createCancelableRoomSignalingPromise.bind(null, token, this._wsServer, localParticipant, encodingParameters, preferredCodecs, options);
     }
   }, {
     key: 'createLocalParticipantSignaling',
@@ -51536,6 +53144,10 @@ var LocalParticipantV2 = function (_LocalParticipantSign) {
         writable: true,
         value: 1
       },
+      _signalingRegion: {
+        value: null,
+        writable: true
+      },
       bandwidthProfile: {
         enumerable: true,
         get: function get() {
@@ -51557,18 +53169,37 @@ var LocalParticipantV2 = function (_LocalParticipantSign) {
         get: function get() {
           return this._revision;
         }
+      },
+      signalingRegion: {
+        enumerable: true,
+        get: function get() {
+          return this._signalingRegion;
+        }
       }
     });
     return _this;
   }
 
   /**
-   * Update the {@link BandwidthProfileOptions}.
-   * @param {BandwidthProfileOptions} bandwidthProfile
+   * Set the signalingRegion.
+   * @param {string} signalingRegion.
    */
 
 
   _createClass(LocalParticipantV2, [{
+    key: 'setSignalingRegion',
+    value: function setSignalingRegion(signalingRegion) {
+      if (!this._signalingRegion) {
+        this._signalingRegion = signalingRegion;
+      }
+    }
+
+    /**
+     * Update the {@link BandwidthProfileOptions}.
+     * @param {BandwidthProfileOptions} bandwidthProfile
+     */
+
+  }, {
     key: 'setBandwidthProfile',
     value: function setBandwidthProfile(bandwidthProfile) {
       if (!isDeepEqual(this._bandwidthProfile, bandwidthProfile)) {
@@ -51734,6 +53365,7 @@ var LocalParticipantV2 = function (_LocalParticipantSign) {
     value: function removeTrack(trackSender) {
       var publication = _get(LocalParticipantV2.prototype.__proto__ || Object.getPrototypeOf(LocalParticipantV2.prototype), 'removeTrack', this).call(this, trackSender);
       if (publication) {
+        trackSender.removeClone(publication.trackTransceiver);
         this._removeListener(publication);
         this.didUpdate();
       }
@@ -52403,6 +54035,8 @@ function _possibleConstructorReturn(self, call) { if (!self) { throw new Referen
 
 function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
 
+var DefaultBackoff = __webpack_require__(/*! backoff */ "./node_modules/backoff/index.js");
+
 var _require = __webpack_require__(/*! @twilio/webrtc */ "./node_modules/@twilio/webrtc/lib/index.js"),
     DefaultMediaStream = _require.MediaStream,
     DefaultRTCIceCandidate = _require.RTCIceCandidate,
@@ -52417,11 +54051,17 @@ var _require3 = __webpack_require__(/*! @twilio/webrtc/lib/util/sdp */ "./node_m
     getSdpFormat = _require3.getSdpFormat;
 
 var _require4 = __webpack_require__(/*! ../../util/constants */ "./node_modules/twilio-video/es5/util/constants.js"),
-    DEFAULT_LOG_LEVEL = _require4.DEFAULT_LOG_LEVEL;
+    DEFAULT_ICE_GATHERING_TIMEOUT_MS = _require4.DEFAULT_ICE_GATHERING_TIMEOUT_MS,
+    DEFAULT_LOG_LEVEL = _require4.DEFAULT_LOG_LEVEL,
+    DEFAULT_SESSION_TIMEOUT_SEC = _require4.DEFAULT_SESSION_TIMEOUT_SEC,
+    iceRestartBackoffConfig = _require4.iceRestartBackoffConfig;
 
 var _require5 = __webpack_require__(/*! ../../util/sdp */ "./node_modules/twilio-video/es5/util/sdp/index.js"),
     createCodecMapForMediaSection = _require5.createCodecMapForMediaSection,
+    disableRtx = _require5.disableRtx,
+    enableDtxForOpus = _require5.enableDtxForOpus,
     getMediaSections = _require5.getMediaSections,
+    removeSSRCAttributes = _require5.removeSSRCAttributes,
     revertSimulcastForNonVP8MediaSections = _require5.revertSimulcastForNonVP8MediaSections,
     setBitrateParameters = _require5.setBitrateParameters,
     setCodecPreferences = _require5.setCodecPreferences,
@@ -52430,15 +54070,16 @@ var _require5 = __webpack_require__(/*! ../../util/sdp */ "./node_modules/twilio
     unifiedPlanAddOrRewriteTrackIds = _require5.unifiedPlanAddOrRewriteTrackIds,
     unifiedPlanFilterLocalCodecs = _require5.unifiedPlanFilterLocalCodecs;
 
+var DefaultTimeout = __webpack_require__(/*! ../../util/timeout */ "./node_modules/twilio-video/es5/util/timeout.js");
+
 var _require6 = __webpack_require__(/*! ../../util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js"),
     MediaClientLocalDescFailedError = _require6.MediaClientLocalDescFailedError,
     MediaClientRemoteDescFailedError = _require6.MediaClientRemoteDescFailedError;
 
-var utils = __webpack_require__(/*! ../../util */ "./node_modules/twilio-video/es5/util/index.js");
-var buildLogLevels = utils.buildLogLevels,
-    makeUUID = utils.makeUUID,
-    oncePerTick = utils.oncePerTick;
-
+var _require7 = __webpack_require__(/*! ../../util */ "./node_modules/twilio-video/es5/util/index.js"),
+    buildLogLevels = _require7.buildLogLevels,
+    isChromeScreenShareTrack = _require7.isChromeScreenShareTrack,
+    oncePerTick = _require7.oncePerTick;
 
 var IceBox = __webpack_require__(/*! ./icebox */ "./node_modules/twilio-video/es5/signaling/v2/icebox.js");
 var DefaultIceConnectionMonitor = __webpack_require__(/*! ./iceconnectionmonitor.js */ "./node_modules/twilio-video/es5/signaling/v2/iceconnectionmonitor.js");
@@ -52455,8 +54096,6 @@ var guess = guessBrowser();
 var isChrome = guess === 'chrome';
 var isFirefox = guess === 'firefox';
 var isSafari = guess === 'safari';
-
-var firefoxMajorVersion = isFirefox ? parseInt(navigator.userAgent.match(/Firefox\/(\d+)/)[1], 10) : null;
 
 var isRTCRtpSenderParamsSupported = typeof RTCRtpSender !== 'undefined' && typeof RTCRtpSender.prototype.getParameters === 'function' && typeof RTCRtpSender.prototype.setParameters === 'function';
 
@@ -52492,6 +54131,7 @@ var states = {
 /**
  * @extends StateMachine
  * @property {id}
+ * @emits PeerConnectionV2#connectionStateChanged
  * @emits PeerConnectionV2#iceConnectionStateChanged
  * @emits PeerConnectionV2#candidates
  * @emits PeerConnectionV2#description
@@ -52515,19 +54155,23 @@ var PeerConnectionV2 = function (_StateMachine) {
     options = Object.assign({
       enableDscp: false,
       dummyAudioMediaStreamTrack: null,
+      isChromeScreenShareTrack: isChromeScreenShareTrack,
       iceServers: [],
       isRTCRtpSenderParamsSupported: isRTCRtpSenderParamsSupported,
       logLevel: DEFAULT_LOG_LEVEL,
       offerOptions: {},
       revertSimulcastForNonVP8MediaSections: revertSimulcastForNonVP8MediaSections,
+      sessionTimeout: DEFAULT_SESSION_TIMEOUT_SEC * 1000,
       setBitrateParameters: setBitrateParameters,
       setCodecPreferences: setCodecPreferences,
       setSimulcast: setSimulcast,
+      Backoff: DefaultBackoff,
       IceConnectionMonitor: DefaultIceConnectionMonitor,
       MediaStream: DefaultMediaStream,
       RTCIceCandidate: DefaultRTCIceCandidate,
       RTCPeerConnection: DefaultRTCPeerConnection,
-      RTCSessionDescription: DefaultRTCSessionDescription
+      RTCSessionDescription: DefaultRTCSessionDescription,
+      Timeout: DefaultTimeout
     }, options);
 
     var configuration = getConfiguration(options);
@@ -52544,18 +54188,11 @@ var PeerConnectionV2 = function (_StateMachine) {
       options.chromeSpecificConstraints.optional.push({ googDscp: true });
     }
 
+    var log = options.log ? options.log.createLog('webrtc', _this) : new Log('webrtc', _this, logLevels, options.loggerName);
     var peerConnection = new RTCPeerConnection(configuration, options.chromeSpecificConstraints);
 
     if (options.dummyAudioMediaStreamTrack) {
       peerConnection.addTrack(options.dummyAudioMediaStreamTrack, localMediaStream || new options.MediaStream());
-    }
-
-    // NOTE(mroberts): We do this to workaround the following bug:
-    //
-    //   https://bugzilla.mozilla.org/show_bug.cgi?id=1481335
-    //
-    if (isFirefox && firefoxMajorVersion < 65) {
-      peerConnection.createDataChannel(makeUUID());
     }
 
     Object.defineProperties(_this, {
@@ -52573,11 +54210,30 @@ var PeerConnectionV2 = function (_StateMachine) {
         writable: true,
         value: 0
       },
+      _didGenerateLocalCandidates: {
+        writable: true,
+        value: false
+      },
       _enableDscp: {
         value: options.enableDscp
       },
       _encodingParameters: {
         value: encodingParameters
+      },
+      _isChromeScreenShareTrack: {
+        value: options.isChromeScreenShareTrack
+      },
+      _iceGatheringFailed: {
+        value: false,
+        writable: true
+      },
+      _iceGatheringTimeout: {
+        value: new options.Timeout(function () {
+          return _this._handleIceGatheringTimeout();
+        }, DEFAULT_ICE_GATHERING_TIMEOUT_MS, false)
+      },
+      _iceRestartBackoff: {
+        value: options.Backoff.exponential(iceRestartBackoffConfig)
       },
       _instanceId: {
         value: ++nInstances
@@ -52587,6 +54243,10 @@ var PeerConnectionV2 = function (_StateMachine) {
         value: false
       },
       _isIceLite: {
+        writable: true,
+        value: false
+      },
+      _isIceRestartBackoffInProgress: {
         writable: true,
         value: false
       },
@@ -52635,7 +54295,10 @@ var PeerConnectionV2 = function (_StateMachine) {
         value: null
       },
       _log: {
-        value: options.log ? options.log.createLog('signaling', _this) : new Log('webrtc', _this, logLevels)
+        value: log
+      },
+      _eventObserver: {
+        value: options.eventObserver
       },
       _remoteCodecMaps: {
         value: new Map()
@@ -52661,6 +54324,17 @@ var PeerConnectionV2 = function (_StateMachine) {
         writable: true,
         value: options.offerOptions
       },
+      _onEncodingParametersChanged: {
+        value: oncePerTick(function () {
+          if (_this._isRTCRtpSenderParamsSupported) {
+            if (!_this._needsAnswer) {
+              updateEncodingParameters(_this);
+            }
+            return;
+          }
+          _this.offer();
+        })
+      },
       _peerConnection: {
         value: peerConnection
       },
@@ -52670,6 +54344,16 @@ var PeerConnectionV2 = function (_StateMachine) {
       _preferredVideoCodecs: {
         value: preferredCodecs.video
       },
+      _shouldApplyDtx: {
+        value: preferredCodecs.audio.every(function (_ref) {
+          var codec = _ref.codec;
+          return codec !== 'opus';
+        }) || preferredCodecs.audio.some(function (_ref2) {
+          var codec = _ref2.codec,
+              dtx = _ref2.dtx;
+          return codec === 'opus' && dtx;
+        })
+      },
       _shouldApplySimulcast: {
         value: (isChrome || isSafari) && preferredCodecs.video.some(function (codecSettings) {
           return codecSettings.codec.toLowerCase() === 'vp8' && codecSettings.simulcast;
@@ -52678,6 +54362,12 @@ var PeerConnectionV2 = function (_StateMachine) {
       _queuedDescription: {
         writable: true,
         value: null
+      },
+      _iceReconnectTimeout: {
+        value: new options.Timeout(function () {
+          log.debug('ICE reconnect timed out');
+          _this.close();
+        }, options.sessionTimeout, false)
       },
       _recycledTransceivers: {
         value: {
@@ -52738,21 +54428,18 @@ var PeerConnectionV2 = function (_StateMachine) {
       }
     });
 
-    encodingParameters.on('changed', oncePerTick(function () {
-      if (_this._isRTCRtpSenderParamsSupported) {
-        if (!_this._needsAnswer) {
-          updateEncodingParameters(_this);
-        }
-        return;
-      }
-      _this.offer();
-    }));
+    encodingParameters.on('changed', _this._onEncodingParametersChanged);
 
+    peerConnection.addEventListener('connectionstatechange', _this._handleConnectionStateChange.bind(_this));
     peerConnection.addEventListener('datachannel', _this._handleDataChannelEvent.bind(_this));
     peerConnection.addEventListener('icecandidate', _this._handleIceCandidateEvent.bind(_this));
     peerConnection.addEventListener('iceconnectionstatechange', _this._handleIceConnectionStateChange.bind(_this));
+    peerConnection.addEventListener('icegatheringstatechange', _this._handleIceGatheringStateChange.bind(_this));
     peerConnection.addEventListener('signalingstatechange', _this._handleSignalingStateChange.bind(_this));
     peerConnection.addEventListener('track', _this._handleTrackEvent.bind(_this));
+    _this._iceRestartBackoff.on('ready', function () {
+      return _this._initiateIceRestart();
+    });
 
     var self = _this;
     _this.on('stateChanged', function stateChanged(state) {
@@ -52774,9 +54461,9 @@ var PeerConnectionV2 = function (_StateMachine) {
     }
 
     /**
-     * The {@link PeerConnectionV2}'s underlying RTCPeerConnection's
-     * RTCIceConnectionState.
-     * @property {RTCIceConnectionState}
+     * The {@link PeerConnectionV2}'s underlying RTCPeerConnection's RTCPeerConnectionState
+     * if supported by the browser, its RTCIceConnectionState otherwise.
+     * @property {RTCPeerConnectionState}
      */
 
   }, {
@@ -52895,23 +54582,41 @@ var PeerConnectionV2 = function (_StateMachine) {
       }).then(function () {
         return _this4._peerConnection.createAnswer();
       }).then(function (answer) {
-        if (!isFirefox) {
+        if (isFirefox) {
+          // NOTE(mmalavalli): We work around Chromium bug 1106157 by disabling
+          // RTX in Firefox 79+. For more details about the bug, please go here:
+          // https://bugs.chromium.org/p/chromium/issues/detail?id=1106157
+          answer = new _this4._RTCSessionDescription({
+            sdp: disableRtx(answer.sdp),
+            type: answer.type
+          });
+        } else {
           answer = workaroundIssue8329(answer);
         }
 
-        var description = answer;
+        // NOTE(mpatwardhan): Upcoming chrome versions are going to remove ssrc attributes
+        // mslabel and label. See this bug https://bugs.chromium.org/p/webrtc/issues/detail?id=7110
+        // and PSA: https://groups.google.com/forum/#!searchin/discuss-webrtc/PSA%7Csort:date/discuss-webrtc/jcZO-Wj0Wus/k2XvPCvoAwAJ
+        // We are not referencing those attributes, but this changes goes ahead and removes them to see if it works.
+        // this also helps reduce bytes on wires
+        var updatedSdp = removeSSRCAttributes(answer.sdp, ['mslabel', 'label']);
         if (_this4._shouldApplySimulcast) {
-          var updatedSdp = _this4._setSimulcast(answer.sdp, _this4._sdpFormat, _this4._trackIdsToAttributes);
+          var sdpWithoutSimulcast = updatedSdp;
+          updatedSdp = _this4._setSimulcast(sdpWithoutSimulcast, _this4._sdpFormat, _this4._trackIdsToAttributes);
           // NOTE(syerrapragada): VMS does not support H264 simulcast. So,
           // unset simulcast for sections in local offer where corresponding
           // sections in answer doesn't have vp8 as preferred codec and reapply offer.
-          updatedSdp = _this4._revertSimulcastForNonVP8MediaSections(updatedSdp, answer.sdp, offer.sdp);
-          description = {
-            type: description.type,
-            sdp: updatedSdp
-          };
+          updatedSdp = _this4._revertSimulcastForNonVP8MediaSections(updatedSdp, sdpWithoutSimulcast, offer.sdp);
         }
-        return _this4._setLocalDescription(description);
+
+        // NOTE(mmalavalli): Work around Chromium bug 1074421.
+        // https://bugs.chromium.org/p/chromium/issues/detail?id=1074421
+        updatedSdp = updatedSdp.replace(/42e015/g, '42e01f');
+
+        return _this4._setLocalDescription({
+          type: answer.type,
+          sdp: updatedSdp
+        });
       }).then(function () {
         return _this4._checkIceBox(offer);
       }).then(function () {
@@ -52920,7 +54625,13 @@ var PeerConnectionV2 = function (_StateMachine) {
         _this4._queuedDescription = null;
         return _this4._maybeReoffer(_this4._peerConnection.localDescription);
       }).catch(function (error) {
-        throw error instanceof MediaClientRemoteDescFailedError ? error : new MediaClientLocalDescFailedError();
+        var errorToThrow = error instanceof MediaClientRemoteDescFailedError ? error : new MediaClientLocalDescFailedError();
+        _this4._publishMediaWarning({
+          message: 'Failed to _answer',
+          code: errorToThrow.code,
+          error: error
+        });
+        throw errorToThrow;
       });
     }
 
@@ -52934,11 +54645,26 @@ var PeerConnectionV2 = function (_StateMachine) {
   }, {
     key: '_close',
     value: function _close() {
+      this._iceConnectionMonitor.stop();
       if (this._peerConnection.signalingState !== 'closed') {
         this._peerConnection.close();
+        this.preempt('closed');
+        this._encodingParameters.removeListener('changed', this._onEncodingParametersChanged);
         return true;
       }
       return false;
+    }
+
+    /**
+     * Handle a "connectionstatechange" event.
+     * @private
+     * @returns {void}
+     */
+
+  }, {
+    key: '_handleConnectionStateChange',
+    value: function _handleConnectionStateChange() {
+      this.emit('connectionStateChanged');
     }
 
     /**
@@ -52992,6 +54718,20 @@ var PeerConnectionV2 = function (_StateMachine) {
         return didReoffer ? Promise.resolve() : _this6._offer();
       });
     }
+  }, {
+    key: '_publishMediaWarning',
+    value: function _publishMediaWarning(_ref3) {
+      var message = _ref3.message,
+          code = _ref3.code,
+          error = _ref3.error,
+          sdp = _ref3.sdp;
+
+      this._eventObserver.emit('event', { level: 'warning', name: 'error', group: 'media', payload: {
+          message: message,
+          code: code,
+          context: JSON.stringify({ error: error.message, sdp: sdp })
+        } });
+    }
 
     /**
      * Handle an ICE candidate event.
@@ -53004,6 +54744,9 @@ var PeerConnectionV2 = function (_StateMachine) {
     key: '_handleIceCandidateEvent',
     value: function _handleIceCandidateEvent(event) {
       if (event.candidate) {
+        this._log.debug('Clearing ICE gathering timeout');
+        this._didGenerateLocalCandidates = true;
+        this._iceGatheringTimeout.clear();
         this._localCandidates.push(event.candidate);
       }
       var peerConnectionState = {
@@ -53035,40 +54778,91 @@ var PeerConnectionV2 = function (_StateMachine) {
 
       var iceConnectionState = this._peerConnection.iceConnectionState;
 
+      var isIceConnectedOrComplete = ['connected', 'completed'].includes(iceConnectionState);
+      var log = this._log;
 
-      this._log.debug('ICE connection state is "' + iceConnectionState + '"');
-
-      // Case 1: Transition to "failed".
-      if (this._lastIceConnectionState !== 'failed' && iceConnectionState === 'failed' && !this._shouldRestartIce && !this._isRestartingIce) {
-        this._log.warn('ICE failed; attempting to restart ICE');
-        this._shouldRestartIce = true;
-        this.offer();
-        // eslint-disable-next-line brace-style
+      log.debug('ICE connection state is "' + iceConnectionState + '"');
+      if (isIceConnectedOrComplete) {
+        this._iceReconnectTimeout.clear();
+        this._iceRestartBackoff.reset();
       }
 
-      // Case 2: Transition from "failed".
-      else if (this._lastIceConnectionState === 'failed' && (iceConnectionState === 'connected' || iceConnectionState === 'completed')) {
-          this._log.info('ICE reconnected');
-        }
+      if (this._lastIceConnectionState !== 'failed' && iceConnectionState === 'failed' && !this._shouldRestartIce && !this._isRestartingIce) {
+        // Case 1: Transition to "failed".
+        log.warn('ICE failed');
+        this._initiateIceRestartBackoff();
+      } else if (['disconnected', 'failed'].includes(this._lastIceConnectionState) && isIceConnectedOrComplete) {
+        // Case 2: Transition from "disconnected" or "failed".
+        log.debug('ICE reconnected');
+      }
 
-      this._isIceConnectionInactive = false;
-      if (iceConnectionState === 'disconnected') {
+      // start monitor media when connected, and continue to monitor while state is complete-disconnected-connected.
+      if (iceConnectionState === 'connected') {
+        this._isIceConnectionInactive = false;
         this._iceConnectionMonitor.start(function () {
+          // note: iceConnection monitor waits for iceConnectionState=disconnected for
+          // detecting inactivity. Its possible that it may know about disconnected before _handleIceConnectionStateChange
           _this7._iceConnectionMonitor.stop();
           if (!_this7._shouldRestartIce && !_this7._isRestartingIce) {
-            _this7._log.warn('ICE Connection Monitor detected inactivity; attempting to restart ICE');
-            _this7._shouldRestartIce = true;
+            log.warn('ICE Connection Monitor detected inactivity');
             _this7._isIceConnectionInactive = true;
-            _this7.offer();
+            _this7._initiateIceRestartBackoff();
             _this7.emit('iceConnectionStateChanged');
+            _this7.emit('connectionStateChanged');
           }
         });
-      } else {
+      } else if (!['disconnected', 'completed'].includes(iceConnectionState)) {
+        // don't stop monitoring for disconnected or completed.
         this._iceConnectionMonitor.stop();
+        this._isIceConnectionInactive = false;
       }
 
       this._lastIceConnectionState = iceConnectionState;
       this.emit('iceConnectionStateChanged');
+    }
+
+    /**
+     * Handle ICE gathering timeout.
+     * @private
+     * @returns {void}
+     */
+
+  }, {
+    key: '_handleIceGatheringTimeout',
+    value: function _handleIceGatheringTimeout() {
+      this._log.warn('ICE failed to gather any local candidates');
+      this._iceGatheringFailed = true;
+      this._initiateIceRestartBackoff();
+      this.emit('iceConnectionStateChanged');
+      this.emit('connectionStateChanged');
+    }
+
+    /**
+     * Handle an ICE gathering state change event.
+     * @private
+     * @returns {void}
+     */
+
+  }, {
+    key: '_handleIceGatheringStateChange',
+    value: function _handleIceGatheringStateChange() {
+      var iceGatheringState = this._peerConnection.iceGatheringState;
+
+      var log = this._log;
+      log.debug('ICE gathering state is "' + iceGatheringState + '"');
+
+      // NOTE(mmalavalli): Start the ICE gathering timeout only if the RTCPeerConnection
+      // has started gathering candidates for the first time since the initial offer/answer
+      // or an offer/answer with ICE restart.
+      var _iceGatheringTimeout = this._iceGatheringTimeout,
+          delay = _iceGatheringTimeout.delay,
+          isSet = _iceGatheringTimeout.isSet;
+
+      if (iceGatheringState === 'gathering' && !this._didGenerateLocalCandidates && !isSet) {
+        log.debug('Starting ICE gathering timeout: ' + delay);
+        this._iceGatheringFailed = false;
+        this._iceGatheringTimeout.start();
+      }
     }
 
     /**
@@ -53082,8 +54876,6 @@ var PeerConnectionV2 = function (_StateMachine) {
     value: function _handleSignalingStateChange() {
       if (this._peerConnection.signalingState === 'stable') {
         this._appliedTrackIdsToAttributes = new Map(this._trackIdsToAttributes);
-      } else if (this._peerConnection.signalingState === 'closed' && this.state !== 'closed') {
-        this.preempt('closed');
       }
     }
 
@@ -53134,6 +54926,52 @@ var PeerConnectionV2 = function (_StateMachine) {
     }
 
     /**
+     * Initiate ICE Restart.
+     * @private
+     * @returns {void}
+     */
+
+  }, {
+    key: '_initiateIceRestart',
+    value: function _initiateIceRestart() {
+      if (this._peerConnection.signalingState === 'closed') {
+        return;
+      }
+      var log = this._log;
+      log.warn('Attempting to restart ICE');
+      this._didGenerateLocalCandidates = false;
+      this._isIceRestartBackoffInProgress = false;
+      this._shouldRestartIce = true;
+
+      var _iceReconnectTimeout = this._iceReconnectTimeout,
+          delay = _iceReconnectTimeout.delay,
+          isSet = _iceReconnectTimeout.isSet;
+
+      if (!isSet) {
+        log.debug('Starting ICE reconnect timeout: ' + delay);
+        this._iceReconnectTimeout.start();
+      }
+      this.offer();
+    }
+
+    /**
+     * Schedule an ICE Restart.
+     * @private
+     * @returns {void}
+     */
+
+  }, {
+    key: '_initiateIceRestartBackoff',
+    value: function _initiateIceRestartBackoff() {
+      if (this._peerConnection.signalingState === 'closed' || this._isIceRestartBackoffInProgress) {
+        return;
+      }
+      this._log.warn('An ICE restart has been scheduled');
+      this._isIceRestartBackoffInProgress = true;
+      this._iceRestartBackoff.backoff();
+    }
+
+    /**
      * Conditionally re-offer.
      * @private
      * @param {?RTCSessionDescriptionInit} localDescription
@@ -53146,20 +54984,11 @@ var PeerConnectionV2 = function (_StateMachine) {
       var shouldReoffer = this._shouldOffer;
 
       if (localDescription && localDescription.sdp) {
-        // NOTE(mmalavalli): For "unified-plan" sdps, if the remote RTCPeerConnection sends
-        // an offer with fewer audio m= lines than the number of audio RTCRTPSenders
-        // in the local RTCPeerConnection, then the local RTCPeerConnection creates
-        // an answer with the same number of audio m= lines as in the offer. This
-        // behavior was triggered by the removal of 'offerToReceiveAudio' from the
-        // default RTCOfferOptions. Ideally, the local RTCPeerConnection should create
-        // an answer with the same number of audio m= lines as the number of
-        // RTCRTPSenders. In order to achieve this,the local RTCPeerConnection
-        // initiates renegotiation.
-        //
-        // We can reduce the number of cases where renegotiation is needed by
-        // re-introducing 'offerToReceiveAudio' to the default RTCOfferOptions with a
-        // value > 1.
-        if (this._isUnifiedPlan && localDescription.type === 'answer') {
+        // NOTE(mmalavalli): For "unified-plan" sdps, if the local RTCSessionDescription
+        // has fewer audio and/or video send* m= lines than the corresponding RTCRtpSenders
+        // with non-null MediaStreamTracks, it means that the newly added RTCRtpSenders
+        // require renegotiation.
+        if (this._isUnifiedPlan) {
           var senders = this._peerConnection.getSenders().filter(function (sender) {
             return sender.track;
           });
@@ -53205,14 +55034,34 @@ var PeerConnectionV2 = function (_StateMachine) {
 
       return Promise.all(this._replaceTrackPromises.values()).then(function () {
         return _this9._peerConnection.createOffer(offerOptions);
-      }).catch(function () {
-        throw new MediaClientLocalDescFailedError();
+      }).catch(function (error) {
+        var errorToThrow = new MediaClientLocalDescFailedError();
+        _this9._publishMediaWarning({
+          message: 'Failed to create offer',
+          code: errorToThrow.code,
+          error: error
+        });
+        throw errorToThrow;
       }).then(function (offer) {
-        if (!isFirefox) {
+        if (isFirefox) {
+          // NOTE(mmalavalli): We work around Chromium bug 1106157 by disabling
+          // RTX in Firefox 79+. For more details about the bug, please go here:
+          // https://bugs.chromium.org/p/chromium/issues/detail?id=1106157
+          offer = new _this9._RTCSessionDescription({
+            sdp: disableRtx(offer.sdp),
+            type: offer.type
+          });
+        } else {
           offer = workaroundIssue8329(offer);
         }
 
-        var sdp = _this9._isUnifiedPlan && _this9._peerConnection.remoteDescription ? unifiedPlanFilterLocalCodecs(offer.sdp, _this9._peerConnection.remoteDescription.sdp) : offer.sdp;
+        // NOTE(mpatwardhan): upcoming chrome versions are going to remove ssrc attributes
+        // mslabel and label. See this bug https://bugs.chromium.org/p/webrtc/issues/detail?id=7110
+        // and PSA: https://groups.google.com/forum/#!searchin/discuss-webrtc/PSA%7Csort:date/discuss-webrtc/jcZO-Wj0Wus/k2XvPCvoAwAJ
+        // Looks like we are not referencing those attributes, but this changes goes ahead and removes them to see if it works.
+        // this also helps reduce bytes on wires
+        var sdp = removeSSRCAttributes(offer.sdp, ['mslabel', 'label']);
+        sdp = _this9._isUnifiedPlan && _this9._peerConnection.remoteDescription ? unifiedPlanFilterLocalCodecs(sdp, _this9._peerConnection.remoteDescription.sdp) : sdp;
 
         var updatedSdp = _this9._setCodecPreferences(sdp, _this9._preferredAudioCodecs, _this9._preferredVideoCodecs);
 
@@ -53236,6 +55085,25 @@ var PeerConnectionV2 = function (_StateMachine) {
     }
 
     /**
+     * Get the MediaTrackSender ID of the given MediaStreamTrack ID.
+     * Since a MediaTrackSender's underlying MediaStreamTrack can be
+     * replaced, the corresponding IDs can mismatch.
+     * @private
+     * @param {Track.ID} id
+     * @returns {Track.ID}
+     */
+
+  }, {
+    key: '_getMediaTrackSenderId',
+    value: function _getMediaTrackSenderId(trackId) {
+      var mediaTrackSender = Array.from(this._rtpSenders.keys()).find(function (_ref4) {
+        var id = _ref4.track.id;
+        return id === trackId;
+      });
+      return mediaTrackSender ? mediaTrackSender.id : trackId;
+    }
+
+    /**
      * Add or rewrite local MediaStreamTrack IDs in the given Unified Plan RTCSessionDescription.
      * @private
      * @param {RTCSessionDescription} description
@@ -53245,10 +55113,12 @@ var PeerConnectionV2 = function (_StateMachine) {
   }, {
     key: '_addOrRewriteLocalTrackIds',
     value: function _addOrRewriteLocalTrackIds(description) {
+      var _this10 = this;
+
       var transceivers = this._peerConnection.getTransceivers();
-      var activeTransceivers = transceivers.filter(function (_ref) {
-        var sender = _ref.sender,
-            stopped = _ref.stopped;
+      var activeTransceivers = transceivers.filter(function (_ref5) {
+        var sender = _ref5.sender,
+            stopped = _ref5.stopped;
         return !stopped && sender && sender.track;
       });
 
@@ -53256,30 +55126,30 @@ var PeerConnectionV2 = function (_StateMachine) {
       // SDPs, and even if they are, there is no guarantee that they will be the same as the
       // actual MediaStreamTrack IDs. So, we add or re-write the actual MediaStreamTrack IDs
       // to the assigned m= sections here.
-      var assignedTransceivers = activeTransceivers.filter(function (_ref2) {
-        var mid = _ref2.mid;
+      var assignedTransceivers = activeTransceivers.filter(function (_ref6) {
+        var mid = _ref6.mid;
         return mid;
       });
-      var midsToTrackIds = new Map(assignedTransceivers.map(function (_ref3) {
-        var mid = _ref3.mid,
-            sender = _ref3.sender;
-        return [mid, sender.track.id];
+      var midsToTrackIds = new Map(assignedTransceivers.map(function (_ref7) {
+        var mid = _ref7.mid,
+            sender = _ref7.sender;
+        return [mid, _this10._getMediaTrackSenderId(sender.track.id)];
       }));
       var sdp1 = unifiedPlanAddOrRewriteTrackIds(description.sdp, midsToTrackIds);
 
       // NOTE(mmalavalli): Chrome and Safari do not apply the offer until they get an answer.
       // So, we add or re-write the actual MediaStreamTrack IDs to the unassigned m= sections here.
-      var unassignedTransceivers = activeTransceivers.filter(function (_ref4) {
-        var mid = _ref4.mid;
+      var unassignedTransceivers = activeTransceivers.filter(function (_ref8) {
+        var mid = _ref8.mid;
         return !mid;
       });
       var newTrackIdsByKind = new Map(['audio', 'video'].map(function (kind) {
-        return [kind, unassignedTransceivers.filter(function (_ref5) {
-          var sender = _ref5.sender;
+        return [kind, unassignedTransceivers.filter(function (_ref9) {
+          var sender = _ref9.sender;
           return sender.track.kind === kind;
-        }).map(function (_ref6) {
-          var sender = _ref6.sender;
-          return sender.track.id;
+        }).map(function (_ref10) {
+          var sender = _ref10.sender;
+          return _this10._getMediaTrackSenderId(sender.track.id);
         })];
       }));
       var sdp2 = unifiedPlanAddOrRewriteNewTrackIds(sdp1, midsToTrackIds, newTrackIdsByKind);
@@ -53300,10 +55170,10 @@ var PeerConnectionV2 = function (_StateMachine) {
   }, {
     key: '_rollbackAndApplyOffer',
     value: function _rollbackAndApplyOffer(offer) {
-      var _this10 = this;
+      var _this11 = this;
 
       return this._setLocalDescription({ type: 'rollback' }).then(function () {
-        return _this10._setLocalDescription(offer);
+        return _this11._setLocalDescription(offer);
       });
     }
 
@@ -53317,26 +55187,55 @@ var PeerConnectionV2 = function (_StateMachine) {
   }, {
     key: '_setLocalDescription',
     value: function _setLocalDescription(description) {
-      var _this11 = this;
+      var _this12 = this;
 
+      if (description.type !== 'rollback' && this._shouldApplyDtx) {
+        description = new this._RTCSessionDescription({
+          sdp: enableDtxForOpus(description.sdp),
+          type: description.type
+        });
+      }
       return this._peerConnection.setLocalDescription(description).catch(function (error) {
-        _this11._log.warn('Calling setLocalDescription with an RTCSessionDescription of type "' + description.type + '" failed with the error "' + error.message + '".');
+        _this12._log.warn('Calling setLocalDescription with an RTCSessionDescription of type "' + description.type + '" failed with the error "' + error.message + '".');
+
+        var errorToThrow = new MediaClientLocalDescFailedError();
+        var publishWarning = {
+          message: 'Calling setLocalDescription with an RTCSessionDescription of type "' + description.type + '" failed',
+          code: errorToThrow.code,
+          error: error
+        };
+
         if (description.sdp) {
-          _this11._log.warn('The SDP was ' + description.sdp);
+          _this12._log.warn('The SDP was ' + description.sdp);
+          publishWarning.sdp = description.sdp;
         }
-        throw new MediaClientLocalDescFailedError();
+        _this12._publishMediaWarning(publishWarning);
+        throw errorToThrow;
       }).then(function () {
         if (description.type !== 'rollback') {
-          _this11._localDescription = _this11._isUnifiedPlan ? _this11._addOrRewriteLocalTrackIds(description) : description;
-          _this11._localCandidates = [];
-          if (description.type === 'offer') {
-            _this11._descriptionRevision++;
-          } else if (description.type === 'answer') {
-            _this11._lastStableDescriptionRevision = _this11._descriptionRevision;
-            negotiationCompleted(_this11);
+          _this12._localDescription = _this12._isUnifiedPlan ? _this12._addOrRewriteLocalTrackIds(description) : description;
+
+          // NOTE(mmalavalli): In order for this feature to be backward compatible with older
+          // SDK versions which to not support opus DTX, we append "usedtx=1" to the local SDP
+          // only while applying it. We will not send it over the wire to prevent inadvertent
+          // enabling of opus DTX in older SDKs. Newer SDKs will append "usedtx=1" by themselves
+          // if the developer has requested opus DTX to be enabled. (JSDK-3063)
+          if (_this12._shouldApplyDtx) {
+            _this12._localDescription = new _this12._RTCSessionDescription({
+              sdp: enableDtxForOpus(_this12._localDescription.sdp, []),
+              type: _this12._localDescription.type
+            });
           }
-          _this11._localUfrag = getUfrag(description);
-          _this11.emit('description', _this11.getState());
+
+          _this12._localCandidates = [];
+          if (description.type === 'offer') {
+            _this12._descriptionRevision++;
+          } else if (description.type === 'answer') {
+            _this12._lastStableDescriptionRevision = _this12._descriptionRevision;
+            negotiationCompleted(_this12);
+          }
+          _this12._localUfrag = getUfrag(description);
+          _this12.emit('description', _this12.getState());
         }
       });
     }
@@ -53351,13 +55250,22 @@ var PeerConnectionV2 = function (_StateMachine) {
   }, {
     key: '_setRemoteDescription',
     value: function _setRemoteDescription(description) {
-      var _this12 = this;
+      var _this13 = this;
 
       if (description.sdp) {
         if (!this._isRTCRtpSenderParamsSupported) {
           description.sdp = this._setBitrateParameters(description.sdp, isFirefox ? 'TIAS' : 'AS', this._encodingParameters.maxAudioBitrate, this._encodingParameters.maxVideoBitrate);
         }
         description.sdp = this._setCodecPreferences(description.sdp, this._preferredAudioCodecs, this._preferredVideoCodecs);
+
+        if (this._shouldApplyDtx) {
+          description.sdp = enableDtxForOpus(description.sdp);
+        } else {
+          // NOTE(mmalavalli): Remove "usedtx=1" from opus's fmtp line if present
+          // since DTX is disabled.
+          description.sdp = enableDtxForOpus(description.sdp, []);
+        }
+
         // NOTE(mroberts): Do this to reduce our MediaStream count in Firefox. By
         // mapping MediaStream IDs in the SDP to "-", we ensure the "track" event
         // doesn't include any new MediaStreams in Firefox. Its `streams` member
@@ -53375,29 +55283,29 @@ var PeerConnectionV2 = function (_StateMachine) {
         // NOTE(syerrapragada): VMS does not support H264 simulcast. So,
         // unset simulcast for sections in local offer where corresponding
         // sections in answer doesn't have vp8 as preferred codec and reapply offer.
-        if (description.type === 'answer' && _this12._shouldApplySimulcast) {
-          var sdpWithoutSimulcastForNonVP8MediaSections = _this12._revertSimulcastForNonVP8MediaSections(_this12._localDescription.sdp, _this12._localDescriptionWithoutSimulcast.sdp, description.sdp);
-          if (sdpWithoutSimulcastForNonVP8MediaSections !== _this12._localDescription.sdp) {
-            return _this12._rollbackAndApplyOffer({
-              type: _this12._localDescription.type,
+        if (description.type === 'answer' && _this13._shouldApplySimulcast) {
+          var sdpWithoutSimulcastForNonVP8MediaSections = _this13._revertSimulcastForNonVP8MediaSections(_this13._localDescription.sdp, _this13._localDescriptionWithoutSimulcast.sdp, description.sdp);
+          if (sdpWithoutSimulcastForNonVP8MediaSections !== _this13._localDescription.sdp) {
+            return _this13._rollbackAndApplyOffer({
+              type: _this13._localDescription.type,
               sdp: sdpWithoutSimulcastForNonVP8MediaSections
             });
           }
         }
       }).then(function () {
-        return _this12._peerConnection.setRemoteDescription(description);
+        return _this13._peerConnection.setRemoteDescription(description);
       }).then(function () {
         if (description.type === 'answer') {
-          if (_this12._isRestartingIce) {
-            _this12._log.debug('An ICE restart was in-progress and is now completed');
-            _this12._isRestartingIce = false;
+          if (_this13._isRestartingIce) {
+            _this13._log.debug('An ICE restart was in-progress and is now completed');
+            _this13._isRestartingIce = false;
           }
-          negotiationCompleted(_this12);
+          negotiationCompleted(_this13);
         }
       }, function (error) {
-        _this12._log.warn('Calling setRemoteDescription with an RTCSessionDescription of type "' + description.type + '" failed with the error "' + error.message + '".');
+        _this13._log.warn('Calling setRemoteDescription with an RTCSessionDescription of type "' + description.type + '" failed with the error "' + error.message + '".');
         if (description.sdp) {
-          _this12._log.warn('The SDP was ' + description.sdp);
+          _this13._log.warn('The SDP was ' + description.sdp);
         }
         throw error;
       });
@@ -53413,7 +55321,7 @@ var PeerConnectionV2 = function (_StateMachine) {
   }, {
     key: '_updateDescription',
     value: function _updateDescription(description) {
-      var _this13 = this;
+      var _this14 = this;
 
       switch (description.type) {
         case 'answer':
@@ -53463,18 +55371,25 @@ var PeerConnectionV2 = function (_StateMachine) {
       // Handle answer or pranswer.
       var revision = description.revision;
       return Promise.resolve().then(function () {
-        return _this13._setRemoteDescription(description);
-      }).catch(function () {
-        throw new MediaClientRemoteDescFailedError();
+        return _this14._setRemoteDescription(description);
+      }).catch(function (error) {
+        var errorToThrow = new MediaClientRemoteDescFailedError();
+        _this14._publishMediaWarning({
+          message: 'Calling setRemoteDescription with an RTCSessionDescription of type "' + description.type + '" failed',
+          code: errorToThrow.code,
+          error: error,
+          sdp: description.sdp
+        });
+        throw errorToThrow;
       }).then(function () {
-        _this13._lastStableDescriptionRevision = revision;
-        _this13._needsAnswer = false;
-        return _this13._checkIceBox(description);
+        _this14._lastStableDescriptionRevision = revision;
+        _this14._needsAnswer = false;
+        return _this14._checkIceBox(description);
       }).then(function () {
-        return _this13._queuedDescription && _this13._updateDescription(_this13._queuedDescription);
+        return _this14._queuedDescription && _this14._updateDescription(_this14._queuedDescription);
       }).then(function () {
-        _this13._queuedDescription = null;
-        return _this13._maybeReoffer(_this13._peerConnection.localDescription).then(function () {});
+        _this14._queuedDescription = null;
+        return _this14._maybeReoffer(_this14._peerConnection.localDescription).then(function () {});
       });
     }
 
@@ -53518,7 +55433,7 @@ var PeerConnectionV2 = function (_StateMachine) {
         dataTrackSender.addDataChannel(dataChannel);
         this._dataChannels.set(dataTrackSender, dataChannel);
       } catch (error) {
-        // Do nothing.
+        this._log.warn('Error creating an RTCDataChannel for DataTrack "' + dataTrackSender.id + '": ' + error.message);
       }
     }
 
@@ -53584,9 +55499,15 @@ var PeerConnectionV2 = function (_StateMachine) {
       if (!this._localDescription) {
         return null;
       }
+
+      // NOTE(mpatwardhan): Return most recent localDescription. If the most recent local description is an
+      // answer, and this method is called for sending a "sync" message while the next remote offer is being processed,
+      // we need to send the most recent stable description revision instead of the current description revision,
+      // which is supposed to be for the next local answer.
+      var localDescriptionRevision = this._localDescription.type === 'answer' ? this._lastStableDescriptionRevision : this._descriptionRevision;
       var localDescription = {
         type: this._localDescription.type,
-        revision: this._descriptionRevision
+        revision: localDescriptionRevision
       };
       if (this._localDescription.sdp) {
         localDescription.sdp = this._localDescription.sdp;
@@ -53605,7 +55526,7 @@ var PeerConnectionV2 = function (_StateMachine) {
   }, {
     key: 'offer',
     value: function offer() {
-      var _this14 = this;
+      var _this15 = this;
 
       if (this._needsAnswer || this._isRestartingIce) {
         this._shouldOffer = true;
@@ -53613,12 +55534,12 @@ var PeerConnectionV2 = function (_StateMachine) {
       }
 
       return this.bracket('offering', function (key) {
-        _this14.transition('updating', key);
-        var promise = _this14._needsAnswer || _this14._isRestartingIce ? Promise.resolve() : _this14._offer();
+        _this15.transition('updating', key);
+        var promise = _this15._needsAnswer || _this15._isRestartingIce ? Promise.resolve() : _this15._offer();
         return promise.then(function () {
-          _this14.tryTransition('open', key);
+          _this15.tryTransition('open', key);
         }, function (error) {
-          _this14.tryTransition('open', key);
+          _this15.tryTransition('open', key);
           throw error;
         });
       });
@@ -53650,11 +55571,13 @@ var PeerConnectionV2 = function (_StateMachine) {
   }, {
     key: 'removeMediaTrackSender',
     value: function removeMediaTrackSender(mediaTrackSender) {
-      if (this._peerConnection.signalingState === 'closed' || !this._rtpSenders.has(mediaTrackSender)) {
+      var sender = this._rtpSenders.get(mediaTrackSender);
+      if (!sender) {
         return;
       }
-      var sender = this._rtpSenders.get(mediaTrackSender);
-      this._peerConnection.removeTrack(sender);
+      if (this._peerConnection.signalingState !== 'closed') {
+        this._peerConnection.removeTrack(sender);
+      }
       if (this._localMediaStream) {
         this._localMediaStream.removeTrack(mediaTrackSender.track);
       }
@@ -53677,6 +55600,20 @@ var PeerConnectionV2 = function (_StateMachine) {
     }
 
     /**
+     * Set the ICE reconnect timeout period.
+     * @param {number} period - Period in milliseconds.
+     * @returns {this}
+     */
+
+  }, {
+    key: 'setIceReconnectTimeout',
+    value: function setIceReconnectTimeout(period) {
+      this._iceReconnectTimeout.setDelay(period);
+      this._log.debug('Updated ICE reconnection timeout period:', this._iceReconnectTimeout.delay);
+      return this;
+    }
+
+    /**
      * Update the {@link PeerConnectionV2}.
      * @param {object} peerConnectionState
      * @returns {Promise<void>}
@@ -53685,29 +55622,29 @@ var PeerConnectionV2 = function (_StateMachine) {
   }, {
     key: 'update',
     value: function update(peerConnectionState) {
-      var _this15 = this;
+      var _this16 = this;
 
       return this.bracket('updating', function (key) {
-        if (_this15.state === 'closed') {
+        if (_this16.state === 'closed') {
           return Promise.resolve();
         }
 
-        _this15.transition('updating', key);
+        _this16.transition('updating', key);
 
         var updates = [];
 
         if (peerConnectionState.ice) {
-          updates.push(_this15._updateIce(peerConnectionState.ice));
+          updates.push(_this16._updateIce(peerConnectionState.ice));
         }
 
         if (peerConnectionState.description) {
-          updates.push(_this15._updateDescription(peerConnectionState.description));
+          updates.push(_this16._updateDescription(peerConnectionState.description));
         }
 
         return Promise.all(updates).then(function () {
-          _this15.tryTransition('open', key);
+          _this16.tryTransition('open', key);
         }, function (error) {
-          _this15.tryTransition('open', key);
+          _this16.tryTransition('open', key);
           throw error;
         });
       });
@@ -53721,16 +55658,28 @@ var PeerConnectionV2 = function (_StateMachine) {
   }, {
     key: 'getStats',
     value: function getStats() {
-      var _this16 = this;
+      var _this17 = this;
 
       return getStatistics(this._peerConnection).then(function (response) {
-        return rewriteTrackIds(_this16, response);
+        return rewriteTrackIds(_this17, response);
       });
     }
   }, {
+    key: 'connectionState',
+    get: function get() {
+      return this.iceConnectionState === 'failed' ? 'failed' : this._peerConnection.connectionState || this.iceConnectionState;
+    }
+
+    /**
+     * The {@link PeerConnectionV2}'s underlying RTCPeerConnection's
+     * RTCIceConnectionState.
+     * @property {RTCIceConnectionState}
+     */
+
+  }, {
     key: 'iceConnectionState',
     get: function get() {
-      return this._isIceConnectionInactive && this._peerConnection.iceConnectionState === 'disconnected' ? 'failed' : this._peerConnection.iceConnectionState;
+      return this._isIceConnectionInactive && this._peerConnection.iceConnectionState === 'disconnected' || this._iceGatheringFailed ? 'failed' : this._peerConnection.iceConnectionState;
     }
 
     /**
@@ -53742,12 +55691,21 @@ var PeerConnectionV2 = function (_StateMachine) {
   }, {
     key: 'isApplicationSectionNegotiated',
     get: function get() {
-      return this._peerConnection.localDescription ? getMediaSections(this._peerConnection.localDescription.sdp, 'application').length > 0 : false;
+      if (this._peerConnection.signalingState !== 'closed') {
+        // accessing .localDescription in 'closed' state causes it throw exceptions.
+        return this._peerConnection.localDescription ? getMediaSections(this._peerConnection.localDescription.sdp, 'application').length > 0 : false;
+      }
+      return true;
     }
   }]);
 
   return PeerConnectionV2;
 }(StateMachine);
+
+function rewriteLocalTrackId(pcv2, stats) {
+  var trackId = pcv2._getMediaTrackSenderId(stats.trackId);
+  return Object.assign(stats, { trackId: trackId });
+}
 
 function rewriteTrackId(pcv2, stats) {
   var receiver = [].concat(_toConsumableArray(pcv2._mediaTrackReceivers)).find(function (receiver) {
@@ -53764,6 +55722,12 @@ function rewriteTrackIds(pcv2, response) {
     }),
     remoteVideoTrackStats: response.remoteVideoTrackStats.map(function (stats) {
       return rewriteTrackId(pcv2, stats);
+    }),
+    localAudioTrackStats: response.localAudioTrackStats.map(function (stats) {
+      return rewriteLocalTrackId(pcv2, stats);
+    }),
+    localVideoTrackStats: response.localVideoTrackStats.map(function (stats) {
+      return rewriteLocalTrackId(pcv2, stats);
     })
   });
 }
@@ -53771,6 +55735,10 @@ function rewriteTrackIds(pcv2, response) {
 /**
  * @event PeerConnectionV2#candidates
  * @param {object} candidates
+ */
+
+/**
+ * @event PeerConnectionV2#connectionStateChanged
  */
 
 /**
@@ -53834,7 +55802,7 @@ function filterOutMediaStreamIds(sdp) {
  * @returns {boolean}
  */
 function shouldRecycleTransceiver(transceiver, pcv2) {
-  return !transceiver.stopped && !pcv2._replaceTrackPromises.has(transceiver) && (transceiver.currentDirection === 'inactive' || transceiver.currentDirection === 'recvonly' || transceiver.direction === 'recvonly');
+  return !transceiver.stopped && !pcv2._replaceTrackPromises.has(transceiver) && ['inactive', 'recvonly'].includes(transceiver.direction);
 }
 
 /**
@@ -53845,11 +55813,12 @@ function shouldRecycleTransceiver(transceiver, pcv2) {
  */
 function takeRecycledTransceiver(pcv2, kind) {
   var preferredCodecs = {
-    audio: pcv2._preferredAudioCodecs.map(function (codec) {
+    audio: pcv2._preferredAudioCodecs.map(function (_ref11) {
+      var codec = _ref11.codec;
       return codec.toLowerCase();
     }),
-    video: pcv2._preferredVideoCodecs.map(function (_ref7) {
-      var codec = _ref7.codec;
+    video: pcv2._preferredVideoCodecs.map(function (_ref12) {
+      var codec = _ref12.codec;
       return codec.toLowerCase();
     })
   }[kind];
@@ -53960,7 +55929,7 @@ function updateEncodingParameters(pcv2) {
 
     if (maxBitrate === null || maxBitrate === 0) {
       removeMaxBitrate(params);
-    } else if (utils.isChromeScreenShareTrack(sender.track)) {
+    } else if (pcv2._isChromeScreenShareTrack(sender.track)) {
       // NOTE(mpatwardhan): Sometimes (JSDK-2557) chrome does not send any bytes on screen track if MaxBitRate is set on it via setParameters,
       // To workaround this issue we will not apply maxBitrate if the track appears to be a screen share track created by chrome
       pcv2._log.warn('Not setting maxBitrate for ' + sender.track.kind + ' Track ' + sender.track.id + ' because it appears to be screen share track: ' + sender.track.label);
@@ -54011,7 +55980,6 @@ function setMaxBitrate(params, maxBitrate) {
     });
   }
 }
-
 module.exports = PeerConnectionV2;
 
 /***/ }),
@@ -54055,6 +56023,7 @@ var isFirefox = guessBrowser() === 'firefox';
  * {@link PeerConnectionManager} manages multiple {@link PeerConnectionV2}s.
  * @extends QueueingEventEmitter
  * @emits PeerConnectionManager#candidates
+ * @emits PeerConnectionManager#connectionStateChanged
  * @emits PeerConnectionManager#description
  * @emits PeerConnectionManager#iceConnectionStateChanged
  * @emits PeerConnectionManager#trackAdded
@@ -54065,12 +56034,11 @@ var PeerConnectionManager = function (_QueueingEventEmitter) {
 
   /**
    * Construct {@link PeerConnectionManager}.
-   * @param {IceServerSource} iceServerSource
    * @param {EncodingParametersImpl} encodingParameters
    * @param {PreferredCodecs} preferredCodecs
    * @param {object} options
    */
-  function PeerConnectionManager(iceServerSource, encodingParameters, preferredCodecs, options) {
+  function PeerConnectionManager(encodingParameters, preferredCodecs, options) {
     _classCallCheck(this, PeerConnectionManager);
 
     var _this = _possibleConstructorReturn(this, (PeerConnectionManager.__proto__ || Object.getPrototypeOf(PeerConnectionManager)).call(this));
@@ -54101,6 +56069,10 @@ var PeerConnectionManager = function (_QueueingEventEmitter) {
         writable: true,
         value: util.defer()
       },
+      _connectionState: {
+        value: 'new',
+        writable: true
+      },
       _dummyAudioTrackSender: {
         value: audioContext ? new MediaTrackSender(createDummyAudioMediaStreamTrack(audioContext)) : null
       },
@@ -54111,12 +56083,13 @@ var PeerConnectionManager = function (_QueueingEventEmitter) {
         writable: true,
         value: 'new'
       },
-      _iceServerSource: {
-        value: iceServerSource
-      },
       _dataTrackSenders: {
         writable: true,
         value: new Set()
+      },
+      _lastConnectionState: {
+        value: 'new',
+        writable: true
       },
       _lastIceConnectionState: {
         writable: true,
@@ -54135,6 +56108,10 @@ var PeerConnectionManager = function (_QueueingEventEmitter) {
       _preferredCodecs: {
         value: preferredCodecs
       },
+      _sessionTimeout: {
+        value: null,
+        writable: true
+      },
       _PeerConnectionV2: {
         value: options.PeerConnectionV2
       }
@@ -54143,9 +56120,9 @@ var PeerConnectionManager = function (_QueueingEventEmitter) {
   }
 
   /**
-   * A summarized RTCIceConnectionState across all the
+   * A summarized RTCPeerConnectionState across all the
    * {@link PeerConnectionManager}'s underlying {@link PeerConnectionV2}s.
-   * @property {RTCIceConnectionState}
+   * @property {RTCPeerConnectionState}
    */
 
 
@@ -54203,7 +56180,9 @@ var PeerConnectionManager = function (_QueueingEventEmitter) {
         var options = Object.assign({
           dummyAudioMediaStreamTrack: this._dummyAudioTrackSender ? this._dummyAudioTrackSender.track : null,
           offerOptions: this._offerOptions
-        }, configuration);
+        }, this._sessionTimeout ? {
+          sessionTimeout: this._sessionTimeout
+        } : {}, configuration);
 
         try {
           peerConnection = new _PeerConnectionV(id, this._encodingParameters, this._preferredCodecs, options);
@@ -54218,10 +56197,20 @@ var PeerConnectionManager = function (_QueueingEventEmitter) {
         peerConnection.on('stateChanged', function stateChanged(state) {
           if (state === 'closed') {
             peerConnection.removeListener('stateChanged', stateChanged);
+            self._dataTrackSenders.forEach(function (sender) {
+              return peerConnection.removeDataTrackSender(sender);
+            });
+            self._mediaTrackSenders.forEach(function (sender) {
+              return peerConnection.removeMediaTrackSender(sender);
+            });
             self._peerConnections.delete(peerConnection.id);
             self._closedPeerConnectionIds.add(peerConnection.id);
+            updateConnectionState(self);
             updateIceConnectionState(self);
           }
+        });
+        peerConnection.on('connectionStateChanged', function () {
+          return updateConnectionState(_this2);
         });
         peerConnection.on('iceConnectionStateChanged', function () {
           return updateIceConnectionState(_this2);
@@ -54243,9 +56232,6 @@ var PeerConnectionManager = function (_QueueingEventEmitter) {
   }, {
     key: 'close',
     value: function close() {
-      if (this._iceServerSource.isStarted) {
-        this._iceServerSource.stop();
-      }
       this._peerConnections.forEach(function (peerConnection) {
         peerConnection.close();
       });
@@ -54337,7 +56323,25 @@ var PeerConnectionManager = function (_QueueingEventEmitter) {
     }
 
     /**
-     * Set the {@link DataTrackSender}s and {@link MediaTrackSenders} on the
+     * Set the ICE reconnect timeout period for all {@link PeerConnectionV2}s.
+     * @param {number} period - Period in milliseconds.
+     * @returns {this}
+     */
+
+  }, {
+    key: 'setIceReconnectTimeout',
+    value: function setIceReconnectTimeout(period) {
+      if (this._sessionTimeout === null) {
+        this._peerConnections.forEach(function (peerConnection) {
+          peerConnection.setIceReconnectTimeout(period);
+        });
+        this._sessionTimeout = period;
+      }
+      return this;
+    }
+
+    /**
+     * Set the {@link DataTrackSender}s and {@link MediaTrackSender}s on the
      * {@link PeerConnectionManager}'s underlying {@link PeerConnectionV2}s.
      * @param {Array<DataTrackSender|MediaTrackSender>} trackSenders
      * @returns {this}
@@ -54410,6 +56414,18 @@ var PeerConnectionManager = function (_QueueingEventEmitter) {
       });
     }
   }, {
+    key: 'connectionState',
+    get: function get() {
+      return this._connectionState;
+    }
+
+    /**
+     * A summarized RTCIceConnectionState across all the
+     * {@link PeerConnectionManager}'s underlying {@link PeerConnectionV2}s.
+     * @property {RTCIceConnectionState}
+     */
+
+  }, {
     key: 'iceConnectionState',
     get: function get() {
       return this._iceConnectionState;
@@ -54435,6 +56451,10 @@ function createDummyAudioMediaStreamTrack(audioContext) {
 /**
  * @event {PeerConnectionManager#candidates}
  * @param {object} candidates
+ */
+
+/**
+ * @event {PeerConnectionManager#connectionStateChanged}
  */
 
 /**
@@ -54534,20 +56554,21 @@ function getMediaTrackSenderChanges(peerConnectionManager, mediaTrackSenders) {
 }
 
 /**
- * This object maps RTCIceConnectionState values to a "rank".
+ * This object maps RTCIceConnectionState and RTCPeerConnectionState values to a "rank".
  */
 var toRank = {
   new: 0,
   checking: 1,
-  connected: 2,
-  completed: 3,
+  connecting: 2,
+  connected: 3,
+  completed: 4,
   disconnected: -1,
   failed: -2,
   closed: -3
 };
 
 /**
- * This object maps "rank" back to RTCIceConnectionState values.
+ * This object maps "rank" back to RTCIceConnectionState or RTCPeerConnectionState values.
  */
 var fromRank = void 0;
 
@@ -54564,11 +56585,11 @@ function createFromRank() {
 }
 
 /**
- * Summarize ICE connection stats.
- * @param {Array<RTCIceConnectionState>} states
- * @returns {RTCIceConnectionState} summary
+ * Summarize RTCIceConnectionStates or RTCPeerConnectionStates.
+ * @param {Array<RTCIceConnectionState>|Array<RTCPeerConnectionState>} states
+ * @returns {RTCIceConnectionState|RTCPeerConnectionState} summary
  */
-function summarizeIceConnectionStates(states) {
+function summarizeIceOrPeerConnectionStates(states) {
   if (!states.length) {
     return 'new';
   }
@@ -54586,11 +56607,27 @@ function summarizeIceConnectionStates(states) {
  */
 function updateIceConnectionState(pcm) {
   pcm._lastIceConnectionState = pcm.iceConnectionState;
-  pcm._iceConnectionState = summarizeIceConnectionStates([].concat(_toConsumableArray(pcm._peerConnections.values())).map(function (pcv2) {
+  pcm._iceConnectionState = summarizeIceOrPeerConnectionStates([].concat(_toConsumableArray(pcm._peerConnections.values())).map(function (pcv2) {
     return pcv2.iceConnectionState;
   }));
   if (pcm.iceConnectionState !== pcm._lastIceConnectionState) {
     pcm.emit('iceConnectionStateChanged');
+  }
+}
+
+/**
+ * Update the {@link PeerConnectionManager}'s `connectionState`, and emit a
+ * "connectionStateChanged" event, if necessary.
+ * @param {PeerConnectionManager} pcm
+ * @returns {void}
+ */
+function updateConnectionState(pcm) {
+  pcm._lastConnectionState = pcm.connectionState;
+  pcm._connectionState = summarizeIceOrPeerConnectionStates([].concat(_toConsumableArray(pcm._peerConnections.values())).map(function (pcv2) {
+    return pcv2.connectionState;
+  }));
+  if (pcm.connectionState !== pcm._lastConnectionState) {
+    pcm.emit('connectionStateChanged');
   }
 }
 
@@ -54658,7 +56695,7 @@ var RecordingV2 = function (_RecordingSignaling) {
         return this;
       }
       this._revision = recording.revision;
-      return this.enable(recording.enabled);
+      return this.enable(recording.is_recording);
     }
   }]);
 
@@ -54709,9 +56746,11 @@ var RemoteParticipantV2 = function (_RemoteParticipantSig) {
    * Construct a {@link RemoteParticipantV2}.
    * @param {object} participantState
    * @param {function(string): Promise<DataTrackReceiver|MediaTrackReceiver>} getTrackReceiver
+   * @param {function(string): boolean} getInitialTrackSwitchOffState
+   *
    * @param {object} [options]
    */
-  function RemoteParticipantV2(participantState, getTrackReceiver, options) {
+  function RemoteParticipantV2(participantState, getTrackReceiver, getInitialTrackSwitchOffState, options) {
     var _ret;
 
     _classCallCheck(this, RemoteParticipantV2);
@@ -54732,6 +56771,9 @@ var RemoteParticipantV2 = function (_RemoteParticipantSig) {
       },
       _getTrackReceiver: {
         value: getTrackReceiver
+      },
+      _getInitialTrackSwitchOffState: {
+        value: getInitialTrackSwitchOffState
       },
       revision: {
         enumerable: true,
@@ -54755,7 +56797,8 @@ var RemoteParticipantV2 = function (_RemoteParticipantSig) {
       var RemoteTrackPublicationV2 = this._RemoteTrackPublicationV2;
       var track = this.tracks.get(trackState.sid);
       if (!track) {
-        track = new RemoteTrackPublicationV2(trackState);
+        var isSwitchedOff = this._getInitialTrackSwitchOffState(trackState.sid);
+        track = new RemoteTrackPublicationV2(trackState, isSwitchedOff);
         this.addTrack(track);
       }
       return track;
@@ -54791,8 +56834,16 @@ var RemoteParticipantV2 = function (_RemoteParticipantSig) {
         }
       });
 
-      if (participantState.state === 'disconnected' && this.state === 'connected') {
-        this.preempt('disconnected');
+      switch (participantState.state) {
+        case 'disconnected':
+          this.disconnect();
+          break;
+        case 'reconnecting':
+          this.reconnecting();
+          break;
+        case 'connected':
+          this.connect(this.sid, this.identity);
+          break;
       }
 
       return this;
@@ -54836,11 +56887,13 @@ var RemoteTrackPublicationV2 = function (_RemoteTrackPublicati) {
   /**
    * Construct a {@link RemoteTrackPublicationV2}.
    * @param {RemoteTrackPublicationV2#Representation} track
+   * @param {boolean} isSwitchedOff
+   *
    */
-  function RemoteTrackPublicationV2(track) {
+  function RemoteTrackPublicationV2(track, isSwitchedOff) {
     _classCallCheck(this, RemoteTrackPublicationV2);
 
-    return _possibleConstructorReturn(this, (RemoteTrackPublicationV2.__proto__ || Object.getPrototypeOf(RemoteTrackPublicationV2)).call(this, track.sid, track.name, track.kind, track.enabled, track.priority));
+    return _possibleConstructorReturn(this, (RemoteTrackPublicationV2.__proto__ || Object.getPrototypeOf(RemoteTrackPublicationV2)).call(this, track.sid, track.name, track.kind, track.enabled, track.priority, isSwitchedOff));
   }
 
   /**
@@ -54910,6 +56963,7 @@ var TrackPrioritySignaling = __webpack_require__(/*! ./trackprioritysignaling */
 var TrackSwitchOffSignaling = __webpack_require__(/*! ./trackswitchoffsignaling */ "./node_modules/twilio-video/es5/signaling/v2/trackswitchoffsignaling.js");
 
 var _require = __webpack_require__(/*! ../../util */ "./node_modules/twilio-video/es5/util/index.js"),
+    DEFAULT_SESSION_TIMEOUT_SEC = _require.constants.DEFAULT_SESSION_TIMEOUT_SEC,
     createBandwidthProfilePayload = _require.createBandwidthProfilePayload,
     defer = _require.defer,
     filterObject = _require.filterObject,
@@ -54919,7 +56973,7 @@ var _require = __webpack_require__(/*! ../../util */ "./node_modules/twilio-vide
 var _require2 = __webpack_require__(/*! ../../util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js"),
     createTwilioError = _require2.createTwilioError;
 
-var STATS_PUBLISH_INTERVAL_MS = 1000;
+var STATS_PUBLISH_INTERVAL_MS = 10000;
 
 /**
  * @extends RoomSignaling
@@ -54931,6 +56985,10 @@ var RoomV2 = function (_RoomSignaling) {
   function RoomV2(localParticipant, initialState, transport, peerConnectionManager, options) {
     _classCallCheck(this, RoomV2);
 
+    initialState.options = Object.assign({
+      session_timeout: DEFAULT_SESSION_TIMEOUT_SEC
+    }, initialState.options);
+
     options = Object.assign({
       DominantSpeakerSignaling: DominantSpeakerSignaling,
       NetworkQualityMonitor: NetworkQualityMonitor,
@@ -54940,9 +56998,12 @@ var RoomV2 = function (_RoomSignaling) {
       TrackPrioritySignaling: TrackPrioritySignaling,
       TrackSwitchOffSignaling: TrackSwitchOffSignaling,
       bandwidthProfile: null,
+      sessionTimeout: initialState.options.session_timeout * 1000,
       statsPublishIntervalMs: STATS_PUBLISH_INTERVAL_MS
     }, options);
+
     localParticipant.setBandwidthProfile(options.bandwidthProfile);
+    peerConnectionManager.setIceReconnectTimeout(options.sessionTimeout);
 
     var _this = _possibleConstructorReturn(this, (RoomV2.__proto__ || Object.getPrototypeOf(RoomV2)).call(this, localParticipant, initialState.sid, initialState.name, options));
 
@@ -54958,8 +57019,8 @@ var RoomV2 = function (_RoomSignaling) {
         value: null,
         writable: true
       },
-      _disconnectedParticipantSids: {
-        value: new Set()
+      _disconnectedParticipantRevisions: {
+        value: new Map()
       },
       _NetworkQualityMonitor: {
         value: options.NetworkQualityMonitor
@@ -55027,11 +57088,18 @@ var RoomV2 = function (_RoomSignaling) {
       _TrackSwitchOffSignaling: {
         value: options.TrackSwitchOffSignaling
       },
+      _pendingSwitchOffStates: {
+        value: new Map()
+      },
       _transport: {
         value: transport
       },
       _trackReceiverDeferreds: {
         value: new Map()
+      },
+      mediaRegion: {
+        enumerable: true,
+        value: initialState.options.media_region || null
       }
     });
 
@@ -55045,8 +57113,8 @@ var RoomV2 = function (_RoomSignaling) {
   }
 
   /**
-   * The Signaling Connection State
-   * @property {string} - "connected", "reconnecting", "disconnected"
+   * The PeerConnection state.
+   * @property {RTCPeerConnectionState}
    */
 
 
@@ -55144,6 +57212,21 @@ var RoomV2 = function (_RoomSignaling) {
      */
 
   }, {
+    key: '_getInitialTrackSwitchOffState',
+    value: function _getInitialTrackSwitchOffState(trackSid) {
+      var initiallySwitchedOff = this._pendingSwitchOffStates.get(trackSid) || false;
+      this._pendingSwitchOffStates.delete(trackSid);
+      if (initiallySwitchedOff) {
+        this._log.warn('[' + trackSid + '] was initially switched off! ');
+      }
+      return initiallySwitchedOff;
+    }
+
+    /**
+     * @private
+     */
+
+  }, {
     key: '_getTrackSidsToTrackSignalings',
     value: function _getTrackSidsToTrackSignalings() {
       var trackSidsToTrackSignalings = flatMap(this.participants, function (participant) {
@@ -55163,12 +57246,12 @@ var RoomV2 = function (_RoomSignaling) {
       var participant = this.participants.get(participantState.sid);
       var self = this;
       if (!participant) {
-        participant = new RemoteParticipantV2(participantState, this._getTrackReceiver.bind(this));
+        participant = new RemoteParticipantV2(participantState, this._getTrackReceiver.bind(this), this._getInitialTrackSwitchOffState.bind(this));
         participant.on('stateChanged', function stateChanged(state) {
           if (state === 'disconnected') {
             participant.removeListener('stateChanged', stateChanged);
             self.participants.delete(participant.sid);
-            self._disconnectedParticipantSids.add(participant.sid);
+            self._disconnectedParticipantRevisions.set(participant.sid, participant.revision);
           }
         });
         this.connectParticipant(participant);
@@ -55269,8 +57352,21 @@ var RoomV2 = function (_RoomSignaling) {
       // eslint-disable-next-line no-warning-comments
       // TODO(mroberts): Remove me once the Server is fixed.
       (roomState.participants || []).forEach(function (participantState) {
-        if (participantState.sid === _this3.localParticipant.sid || _this3._disconnectedParticipantSids.has(participantState.sid)) {
+        if (participantState.sid === _this3.localParticipant.sid) {
           return;
+        }
+
+        // NOTE(mmalavalli): If the incoming revision for a disconnected Participant is less than or
+        // equal to the revision when it was disconnected, then the state is old and can be ignored.
+        // Otherwise, the Participant was most likely disconnected in a Large Group Room when it
+        // stopped publishing media, and hence needs to be re-added.
+        var disconnectedParticipantRevision = _this3._disconnectedParticipantRevisions.get(participantState.sid);
+        if (disconnectedParticipantRevision && participantState.revision <= disconnectedParticipantRevision) {
+          return;
+        }
+
+        if (disconnectedParticipantRevision) {
+          _this3._disconnectedParticipantRevisions.delete(participantState.sid);
         }
         var participant = _this3._getOrCreateRemoteParticipant(participantState);
         participant.update(participantState);
@@ -55354,9 +57450,9 @@ var RoomV2 = function (_RoomSignaling) {
           return _this4._teardownTrackPrioritySignaling();
         });
 
-        var trackPrioritySignaling = new _this4._TrackPrioritySignaling(receiver.toDataTransport());
+        _this4._trackPrioritySignaling = new _this4._TrackPrioritySignaling(receiver.toDataTransport());
         [].concat(_toConsumableArray(_this4.participants.values())).forEach(function (participant) {
-          participant.setTrackPrioritySignaling(trackPrioritySignaling);
+          participant.setTrackPrioritySignaling(_this4._trackPrioritySignaling);
         });
       });
       this._trackPriorityPromise = trackPriorityPromise;
@@ -55368,16 +57464,36 @@ var RoomV2 = function (_RoomSignaling) {
 
       this._trackSwitchOffSignaling = trackSwitchOffSignaling;
       trackSwitchOffSignaling.on('updated', function (tracksOff, tracksOn) {
-        _this5.participants.forEach(function (participant) {
-          participant.tracks.forEach(function (track) {
-            if (tracksOff.includes(track.sid)) {
-              track.setSwitchedOff(true);
-            }
-            if (tracksOn.includes(track.sid)) {
-              track.setSwitchedOff(false);
-            }
+        try {
+          _this5._log.warn('trackSwitchOff: On: ', tracksOn, ' Off: ', tracksOff);
+          var trackUpdates = new Map();
+          tracksOn.forEach(function (trackSid) {
+            return trackUpdates.set(trackSid, true);
           });
-        });
+          tracksOff.forEach(function (trackSid) {
+            if (trackUpdates.get(trackSid)) {
+              // NOTE(mpatwardhan): This means that VIDEO-3762 has been reproduced.
+              _this5._log.warn(trackSid + ' is DUPLICATED in both tracksOff and tracksOn list');
+            }
+            trackUpdates.set(trackSid, false);
+          });
+          _this5.participants.forEach(function (participant) {
+            participant.tracks.forEach(function (track) {
+              var isOn = trackUpdates.get(track.sid);
+              if (typeof isOn !== 'undefined') {
+                track.setSwitchedOff(!isOn);
+                trackUpdates.delete(track.sid);
+              }
+            });
+          });
+
+          // NOTE(mpatwardhan): Cache any notification about the tracks that we do not yet know about.
+          trackUpdates.forEach(function (isOn, trackSid) {
+            return _this5._pendingSwitchOffStates.set(trackSid, !isOn);
+          });
+        } catch (ex) {
+          _this5._log.error('error processing track switch off:', ex);
+        }
       });
     }
   }, {
@@ -55495,7 +57611,7 @@ var RoomV2 = function (_RoomSignaling) {
 
       this._networkQualityMonitor = networkQualityMonitor;
       networkQualityMonitor.on('updated', function () {
-        if (_this10.mediaConnectionState === 'failed') {
+        if (_this10.iceConnectionState === 'failed') {
           return;
         }
         _this10.localParticipant.setNetworkQualityLevel(networkQualityMonitor.level, networkQualityMonitor.levels);
@@ -55566,18 +57682,29 @@ var RoomV2 = function (_RoomSignaling) {
       });
     }
   }, {
+    key: 'connectionState',
+    get: function get() {
+      return this._peerConnectionManager.connectionState;
+    }
+
+    /**
+     * The Signaling Connection State.
+     * @property {string} - "connected", "reconnecting", "disconnected"
+     */
+
+  }, {
     key: 'signalingConnectionState',
     get: function get() {
       return this._transport.state === 'syncing' ? 'reconnecting' : this._transport.state;
     }
 
     /**
-     * The Media Connection State
+     * The Ice Connection State.
      * @property {RTCIceConnectionState}
      */
 
   }, {
-    key: 'mediaConnectionState',
+    key: 'iceConnectionState',
     get: function get() {
       return this._peerConnectionManager.iceConnectionState;
     }
@@ -55666,6 +57793,22 @@ function handleLocalParticipantEvents(roomV2, localParticipant) {
       localParticipant.disconnect();
     }
   });
+
+  roomV2.on('signalingConnectionStateChanged', function () {
+    var localParticipant = roomV2.localParticipant,
+        signalingConnectionState = roomV2.signalingConnectionState;
+    var identity = localParticipant.identity,
+        sid = localParticipant.sid;
+
+    switch (signalingConnectionState) {
+      case 'connected':
+        localParticipant.connect(sid, identity);
+        break;
+      case 'reconnecting':
+        localParticipant.reconnecting();
+        break;
+    }
+  });
 }
 
 function handlePeerConnectionEvents(roomV2, peerConnectionManager) {
@@ -55683,9 +57826,13 @@ function handlePeerConnectionEvents(roomV2, peerConnectionManager) {
   peerConnectionManager.dequeue('trackAdded');
   peerConnectionManager.getTrackReceivers().forEach(roomV2._addTrackReceiver, roomV2);
 
+  peerConnectionManager.on('connectionStateChanged', function () {
+    roomV2.emit('connectionStateChanged');
+  });
+
   peerConnectionManager.on('iceConnectionStateChanged', function () {
-    roomV2.emit('mediaConnectionStateChanged');
-    if (roomV2.mediaConnectionState === 'failed') {
+    roomV2.emit('iceConnectionStateChanged');
+    if (roomV2.iceConnectionState === 'failed') {
       if (roomV2.localParticipant.networkQualityLevel !== null) {
         roomV2.localParticipant.setNetworkQualityLevel(0);
       }
@@ -55719,13 +57866,15 @@ function handleTransportEvents(roomV2, transport) {
  * @param {Number} intervalMs
  */
 function periodicallyPublishStats(roomV2, transport, intervalMs) {
+  var oddPublishCount = false;
   var interval = setInterval(function () {
     roomV2.getStats().then(function (stats) {
+      oddPublishCount = !oddPublishCount;
       stats.forEach(function (response, id) {
         // NOTE(mmalavalli): A StatsReport is used to publish a "stats-report"
         // event instead of using StandardizedStatsResponse directly because
-        // StatsReport will add nulls to properties that do not exist.
-        var report = new StatsReport(id, response);
+        // StatsReport will add zeros to properties that do not exist.
+        var report = new StatsReport(id, response, true /* prepareForInsights */);
 
         transport.publishEvent('quality', 'stats-report', {
           audioTrackStats: report.remoteAudioTrackStats,
@@ -55735,12 +57884,14 @@ function periodicallyPublishStats(roomV2, transport, intervalMs) {
           videoTrackStats: report.remoteVideoTrackStats
         });
 
-        // NOTE(mmalavalli): null properties of the "active-ice-candidate-pair"
-        // payload are assigned default values until the Insights gateway
-        // accepts null values.
-        var activeIceCandidatePair = replaceNullsWithDefaults(response.activeIceCandidatePair, report.peerConnectionId);
+        if (oddPublishCount) {
+          // NOTE(mmalavalli): null properties of the "active-ice-candidate-pair"
+          // payload are assigned default values until the Insights gateway
+          // accepts null values.
+          var activeIceCandidatePair = replaceNullsWithDefaults(response.activeIceCandidatePair, report.peerConnectionId);
 
-        transport.publishEvent('quality', 'active-ice-candidate-pair', activeIceCandidatePair);
+          transport.publishEvent('quality', 'active-ice-candidate-pair', activeIceCandidatePair);
+        }
       });
     }, function () {
       // Do nothing.
@@ -55989,22 +58140,27 @@ var InsightsPublisher = __webpack_require__(/*! ../../util/insightspublisher */ 
 var NullInsightsPublisher = __webpack_require__(/*! ../../util/insightspublisher/null */ "./node_modules/twilio-video/es5/util/insightspublisher/null.js");
 var StateMachine = __webpack_require__(/*! ../../statemachine */ "./node_modules/twilio-video/es5/statemachine.js");
 var TwilioConnection = __webpack_require__(/*! ../../twilioconnection */ "./node_modules/twilio-video/es5/twilioconnection.js");
+var DefaultBackoff = __webpack_require__(/*! backoff */ "./node_modules/backoff/index.js");
 
-var _require2 = __webpack_require__(/*! ../../util */ "./node_modules/twilio-video/es5/util/index.js"),
-    createBandwidthProfilePayload = _require2.createBandwidthProfilePayload,
-    createMediaSignalingPayload = _require2.createMediaSignalingPayload,
-    createSubscribePayload = _require2.createSubscribePayload,
-    getUserAgent = _require2.getUserAgent,
-    withJitter = _require2.withJitter;
+var _require2 = __webpack_require__(/*! ../../util/constants */ "./node_modules/twilio-video/es5/util/constants.js"),
+    reconnectBackoffConfig = _require2.reconnectBackoffConfig;
 
-var _require3 = __webpack_require__(/*! ../../util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js"),
-    createTwilioError = _require3.createTwilioError,
-    RoomCompletedError = _require3.RoomCompletedError,
-    SignalingConnectionError = _require3.SignalingConnectionError;
+var Timeout = __webpack_require__(/*! ../../util/timeout */ "./node_modules/twilio-video/es5/util/timeout.js");
 
-var MAX_RECONNECT_ATTEMPTS = 5;
-var RECONNECT_BACKOFF_JITTER = 100;
-var RECONNECT_BACKOFF_MS = 100;
+var _require3 = __webpack_require__(/*! ../../util */ "./node_modules/twilio-video/es5/util/index.js"),
+    createBandwidthProfilePayload = _require3.createBandwidthProfilePayload,
+    createMediaSignalingPayload = _require3.createMediaSignalingPayload,
+    createSubscribePayload = _require3.createSubscribePayload,
+    getUserAgent = _require3.getUserAgent,
+    isNonArrayObject = _require3.isNonArrayObject;
+
+var _require4 = __webpack_require__(/*! ../../util/twilio-video-errors */ "./node_modules/twilio-video/es5/util/twilio-video-errors.js"),
+    createTwilioError = _require4.createTwilioError,
+    RoomCompletedError = _require4.RoomCompletedError,
+    SignalingConnectionError = _require4.SignalingConnectionError,
+    SignalingServerBusyError = _require4.SignalingServerBusyError;
+
+var ICE_VERSION = 1;
 var RSP_VERSION = 2;
 var SDK_NAME = packageInfo.name + '.js';
 var SDK_VERSION = packageInfo.version;
@@ -56064,12 +58220,11 @@ var TwilioConnectionTransport = function (_StateMachine) {
     _classCallCheck(this, TwilioConnectionTransport);
 
     options = Object.assign({
+      Backoff: DefaultBackoff,
       InsightsPublisher: InsightsPublisher,
       NullInsightsPublisher: NullInsightsPublisher,
       TwilioConnection: TwilioConnection,
-      maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS,
-      reconnectBackOffJitter: RECONNECT_BACKOFF_JITTER,
-      reconnectBackOffMs: RECONNECT_BACKOFF_MS,
+      iceServers: null,
       sdpFormat: getSdpFormat(options.sdpSemantics),
       trackPriority: true,
       trackSwitchOff: true,
@@ -56100,8 +58255,8 @@ var TwilioConnectionTransport = function (_StateMachine) {
       _eventPublisher: {
         value: new EventPublisher(accessToken, SDK_NAME, SDK_VERSION, options.environment, options.realm, eventPublisherOptions)
       },
-      _iceServerSourceStatus: {
-        value: options.iceServerSourceStatus
+      _iceServersStatus: {
+        value: Array.isArray(options.iceServers) ? 'overrode' : 'acquire'
       },
       _localParticipant: {
         value: localParticipant
@@ -56110,7 +58265,7 @@ var TwilioConnectionTransport = function (_StateMachine) {
         value: name
       },
       _networkQuality: {
-        value: options.networkQuality
+        value: isNonArrayObject(options.networkQuality) || options.networkQuality
       },
       _options: {
         value: options
@@ -56118,15 +58273,16 @@ var TwilioConnectionTransport = function (_StateMachine) {
       _peerConnectionManager: {
         value: peerConnectionManager
       },
-      _reconnectAttemptsLeft: {
-        value: options.maxReconnectAttempts,
+      _sessionTimer: {
+        value: null,
         writable: true
       },
-      _reconnectBackOffJitter: {
-        value: options.reconnectBackOffJitter
+      _sessionTimeoutMS: {
+        value: 0, // initially 0, set only after 1st successful connection.
+        writable: true
       },
-      _reconnectBackOffMs: {
-        value: options.reconnectBackOffMs
+      _reconnectBackoff: {
+        value: options.Backoff.exponential(reconnectBackoffConfig)
       },
       _session: {
         value: null,
@@ -56155,7 +58311,12 @@ var TwilioConnectionTransport = function (_StateMachine) {
         value: wsServer
       }
     });
-    setupEventListeners(_this);
+
+    if (options.eventObserver) {
+      options.eventObserver.setPublisher(_this._eventPublisher);
+    }
+
+    setupTransport(_this);
 
     _this.once('connected', function (_ref) {
       var sid = _ref.sid,
@@ -56167,25 +58328,25 @@ var TwilioConnectionTransport = function (_StateMachine) {
   }
 
   /**
-   * Send a Connect, Sync or Disconnect RSP message.
+   * Create a Connect, Sync or Disconnect RSP message.
    * @private
+   * @returns {?object}
    */
 
 
   _createClass(TwilioConnectionTransport, [{
-    key: '_sendConnectOrSyncOrDisconnectMessage',
-    value: function _sendConnectOrSyncOrDisconnectMessage() {
+    key: '_createConnectOrSyncOrDisconnectMessage',
+    value: function _createConnectOrSyncOrDisconnectMessage() {
       if (this.state === 'connected') {
-        return;
+        return null;
       }
 
       if (this.state === 'disconnected') {
-        this._twilioConnection.sendMessage({
+        return {
           session: this._session,
           type: 'disconnect',
           version: RSP_VERSION
-        });
-        return;
+        };
       }
 
       var type = {
@@ -56202,7 +58363,7 @@ var TwilioConnectionTransport = function (_StateMachine) {
       };
 
       if (message.type === 'connect') {
-        message.ice_servers = this._iceServerSourceStatus;
+        message.ice_servers = this._iceServersStatus;
 
         message.publisher = {
           name: SDK_NAME,
@@ -56229,7 +58390,38 @@ var TwilioConnectionTransport = function (_StateMachine) {
       } else if (message.type === 'update') {
         message.session = this._session;
       }
-      this._twilioConnection.sendMessage(message);
+
+      return message;
+    }
+
+    /**
+     * Create an "ice" message.
+     * @private
+     */
+
+  }, {
+    key: '_createIceMessage',
+    value: function _createIceMessage() {
+      return {
+        edge: 'roaming', // roaming here means use same edge as signaling.
+        token: this._accessToken,
+        type: 'ice',
+        version: ICE_VERSION
+      };
+    }
+
+    /**
+     * Send a Connect, Sync or Disconnect RSP message.
+     * @private
+     */
+
+  }, {
+    key: '_sendConnectOrSyncOrDisconnectMessage',
+    value: function _sendConnectOrSyncOrDisconnectMessage() {
+      var message = this._createConnectOrSyncOrDisconnectMessage();
+      if (message) {
+        this._twilioConnection.sendMessage(message);
+      }
     }
 
     /**
@@ -56310,6 +58502,74 @@ var TwilioConnectionTransport = function (_StateMachine) {
       }
       return false;
     }
+
+    /**
+     * @private
+     * @returns {void}
+     */
+
+  }, {
+    key: '_setSession',
+    value: function _setSession(session, sessionTimeout) {
+      this._session = session;
+      this._sessionTimeoutMS = sessionTimeout * 1000;
+    }
+
+    /**
+     * Determines if we should attempt reconnect.
+     * returns a Promise to wait on before attempting to
+     * reconnect. returns null if its not okay to reconnect.
+     * @private
+     * @returns {Promise<void>}
+     */
+
+  }, {
+    key: '_getReconnectTimer',
+    value: function _getReconnectTimer() {
+      var _this2 = this;
+
+      if (this._sessionTimeoutMS === 0) {
+        // this means either we have never connected.
+        // or we timed out while trying to reconnect
+        // In either case we do not want to reconnect.
+        return null;
+      }
+
+      // start session timer
+      if (!this._sessionTimer) {
+        this._sessionTimer = new Timeout(function () {
+          // ensure that _clearReconnectTimer wasn't
+          // called while we were waiting.
+          if (_this2._sessionTimer) {
+            // do not allow any more reconnect attempts.
+            _this2._sessionTimeoutMS = 0;
+          }
+        }, this._sessionTimeoutMS);
+      }
+
+      // return promise that waits with exponential backoff.
+      return new Promise(function (resolve) {
+        _this2._reconnectBackoff.once('ready', resolve);
+        _this2._reconnectBackoff.backoff();
+      });
+    }
+
+    /**
+     * clears the session reconnect timer.
+     *
+     * @private
+     * @returns {void}
+     */
+
+  }, {
+    key: '_clearReconnectTimer',
+    value: function _clearReconnectTimer() {
+      this._reconnectBackoff.reset();
+      if (this._sessionTimer) {
+        this._sessionTimer.clear();
+        this._sessionTimer = null;
+      }
+    }
   }]);
 
   return TwilioConnectionTransport;
@@ -56322,7 +58582,7 @@ var TwilioConnectionTransport = function (_StateMachine) {
 
 /**
  * @event TwilioConnectionTransport#message
- * @param {object} state
+ * @param {object} peerConnections
  */
 
 function reducePeerConnections(peerConnections) {
@@ -56375,21 +58635,35 @@ function reduceUpdates(updates) {
   }, {});
 }
 
-function setupEventListeners(transport) {
-  function connect() {
-    transport._sendConnectOrSyncOrDisconnectMessage();
-  }
-
+function setupTransport(transport) {
   function createOrResetTwilioConnection() {
+    if (transport.state === 'disconnected') {
+      return;
+    }
     if (transport._twilioConnection) {
       transport._twilioConnection.removeListener('message', handleMessage);
     }
-    var _options = transport._options,
-        _wsServer = transport._wsServer;
-    var TwilioConnection = transport._options.TwilioConnection;
+    var _iceServersStatus = transport._iceServersStatus,
+        _options = transport._options,
+        _wsServer = transport._wsServer,
+        state = transport.state;
+    var TwilioConnection = _options.TwilioConnection;
 
-    transport._twilioConnection = new TwilioConnection(_wsServer, _options);
-    return transport._twilioConnection;
+
+    var twilioConnection = new TwilioConnection(_wsServer, Object.assign({
+      helloBody: state === 'connecting' && _iceServersStatus === 'acquire' ? transport._createIceMessage() : transport._createConnectOrSyncOrDisconnectMessage()
+    }, _options));
+
+    twilioConnection.once('close', function (reason) {
+      if (reason === TwilioConnection.CloseReason.LOCAL) {
+        disconnect();
+      } else {
+        disconnect(new Error(reason));
+      }
+    });
+
+    twilioConnection.on('message', handleMessage);
+    transport._twilioConnection = twilioConnection;
   }
 
   function disconnect(error) {
@@ -56400,39 +58674,19 @@ function setupEventListeners(transport) {
       transport.disconnect();
       return;
     }
-    if (transport._reconnectAttemptsLeft <= 0) {
-      transport.disconnect(new SignalingConnectionError());
+
+    var reconnectTimer = transport._getReconnectTimer();
+    if (!reconnectTimer) {
+      var twilioError = error.message === TwilioConnection.CloseReason.BUSY ? new SignalingServerBusyError() : new SignalingConnectionError();
+      transport.disconnect(twilioError);
       return;
     }
-    reconnect();
-  }
 
-  function reconnect() {
     if (transport.state === 'connected') {
       transport.preempt('syncing');
     }
-    transport._reconnectAttemptsLeft--;
-    var maxReconnectAttempts = transport._options.maxReconnectAttempts;
 
-    var reconnectAttempts = maxReconnectAttempts - transport._reconnectAttemptsLeft;
-    var backOffMs = (1 << reconnectAttempts) * transport._reconnectBackOffMs;
-    setTimeout(startConnect, withJitter(backOffMs, transport._reconnectBackOffJitter));
-  }
-
-  function resetReconnectAttemptsLeft() {
-    var maxReconnectAttempts = transport._options.maxReconnectAttempts;
-
-    transport._reconnectAttemptsLeft = maxReconnectAttempts;
-  }
-
-  function startConnect() {
-    if (transport.state === 'disconnected') {
-      return;
-    }
-    var twilioConnection = createOrResetTwilioConnection();
-    twilioConnection.once('close', disconnect);
-    twilioConnection.on('message', handleMessage);
-    twilioConnection.once('open', connect);
+    reconnectTimer.then(createOrResetTwilioConnection);
   }
 
   function handleMessage(message) {
@@ -56460,8 +58714,13 @@ function setupEventListeners(transport) {
         }
       case 'connecting':
         switch (message.type) {
+          case 'iced':
+            transport._options.onIced(message.ice_servers).then(function () {
+              transport._sendConnectOrSyncOrDisconnectMessage();
+            });
+            return;
           case 'connected':
-            transport._session = message.session;
+            transport._setSession(message.session, message.options.session_timeout);
             transport.emit('connected', message);
             transport.preempt('connected');
             return;
@@ -56483,7 +58742,7 @@ function setupEventListeners(transport) {
             transport._updatesReceived.push(message);
             return;
           case 'synced':
-            resetReconnectAttemptsLeft();
+            transport._clearReconnectTimer();
             transport.emit('message', message);
             transport.preempt('connected');
             return;
@@ -56526,7 +58785,17 @@ function setupEventListeners(transport) {
     }
   });
 
-  startConnect();
+  var _options = transport._options,
+      _iceServersStatus = transport._iceServersStatus;
+  var iceServers = _options.iceServers,
+      onIced = _options.onIced;
+
+
+  if (_iceServersStatus === 'overrode') {
+    onIced(iceServers).then(createOrResetTwilioConnection);
+  } else {
+    createOrResetTwilioConnection();
+  }
 }
 
 module.exports = TwilioConnectionTransport;
@@ -57255,11 +59524,12 @@ var LocalAudioTrackStats = function (_LocalTrackStats) {
   /**
    * @param {string} trackId - {@link LocalAudioTrack} ID
    * @param {StandardizedTrackStatsReport} statsReport
+   * @param {boolean} prepareForInsights
    */
-  function LocalAudioTrackStats(trackId, statsReport) {
+  function LocalAudioTrackStats(trackId, statsReport, prepareForInsights) {
     _classCallCheck(this, LocalAudioTrackStats);
 
-    var _this = _possibleConstructorReturn(this, (LocalAudioTrackStats.__proto__ || Object.getPrototypeOf(LocalAudioTrackStats)).call(this, trackId, statsReport));
+    var _this = _possibleConstructorReturn(this, (LocalAudioTrackStats.__proto__ || Object.getPrototypeOf(LocalAudioTrackStats)).call(this, trackId, statsReport, prepareForInsights));
 
     Object.defineProperties(_this, {
       audioLevel: {
@@ -57319,23 +59589,24 @@ var LocalTrackStats = function (_TrackStats) {
   /**
    * @param {string} trackId - {@link LocalTrack} ID
    * @param {StandardizedTrackStatsReport} statsReport
+   * @param {boolean} prepareForInsights
    */
-  function LocalTrackStats(trackId, statsReport) {
+  function LocalTrackStats(trackId, statsReport, prepareForInsights) {
     _classCallCheck(this, LocalTrackStats);
 
     var _this = _possibleConstructorReturn(this, (LocalTrackStats.__proto__ || Object.getPrototypeOf(LocalTrackStats)).call(this, trackId, statsReport));
 
     Object.defineProperties(_this, {
       bytesSent: {
-        value: typeof statsReport.bytesSent === 'number' ? statsReport.bytesSent : null,
+        value: typeof statsReport.bytesSent === 'number' ? statsReport.bytesSent : prepareForInsights ? 0 : null,
         enumerable: true
       },
       packetsSent: {
-        value: typeof statsReport.packetsSent === 'number' ? statsReport.packetsSent : null,
+        value: typeof statsReport.packetsSent === 'number' ? statsReport.packetsSent : prepareForInsights ? 0 : null,
         enumerable: true
       },
       roundTripTime: {
-        value: typeof statsReport.roundTripTime === 'number' ? statsReport.roundTripTime : null,
+        value: typeof statsReport.roundTripTime === 'number' ? statsReport.roundTripTime : prepareForInsights ? 0 : null,
         enumerable: true
       }
     });
@@ -57382,11 +59653,12 @@ var LocalVideoTrackStats = function (_LocalTrackStats) {
   /**
    * @param {string} trackId - {@link LocalVideoTrack} ID
    * @param {StandardizedTrackStatsReport} statsReport
+   * @param {boolean} prepareForInsights
    */
-  function LocalVideoTrackStats(trackId, statsReport) {
+  function LocalVideoTrackStats(trackId, statsReport, prepareForInsights) {
     _classCallCheck(this, LocalVideoTrackStats);
 
-    var _this = _possibleConstructorReturn(this, (LocalVideoTrackStats.__proto__ || Object.getPrototypeOf(LocalVideoTrackStats)).call(this, trackId, statsReport));
+    var _this = _possibleConstructorReturn(this, (LocalVideoTrackStats.__proto__ || Object.getPrototypeOf(LocalVideoTrackStats)).call(this, trackId, statsReport, prepareForInsights));
 
     var captureDimensions = null;
     if (typeof statsReport.frameWidthInput === 'number' && typeof statsReport.frameHeightInput === 'number') {
@@ -58087,6 +60359,9 @@ function _toConsumableArray(arr) { if (Array.isArray(arr)) { for (var i = 0, arr
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
+var _require = __webpack_require__(/*! @twilio/webrtc/lib/util */ "./node_modules/@twilio/webrtc/lib/util/index.js"),
+    guessBrowser = _require.guessBrowser;
+
 var IceReportFactory = __webpack_require__(/*! ./icereportfactory */ "./node_modules/twilio-video/es5/stats/icereportfactory.js");
 var PeerConnectionReport = __webpack_require__(/*! ./peerconnectionreport */ "./node_modules/twilio-video/es5/stats/peerconnectionreport.js");
 var ReceiverReportFactory = __webpack_require__(/*! ./receiverreportfactory */ "./node_modules/twilio-video/es5/stats/receiverreportfactory.js");
@@ -58182,7 +60457,7 @@ var PeerConnectionReportFactory = function () {
     value: function next() {
       var _this = this;
 
-      var updatePromise = typeof mozRTCPeerConnection !== 'undefined' ? updateFirefox(this) : updateChrome(this);
+      var updatePromise = guessBrowser() === 'firefox' ? updateFirefox(this) : updateChrome(this);
 
       return updatePromise.then(function () {
         var audioSenderReportFactories = [].concat(_toConsumableArray(_this.audio.send.values()));
@@ -58384,7 +60659,7 @@ function updateSenderReports(factory, report, senderReportFactoryIdsToDeleteByMe
       var stats = _step2.value;
 
       if (stats.type === 'outbound-rtp' && !stats.isRemote) {
-        if (typeof mozRTCPeerConnection === 'undefined' && !stats.trackId) {
+        if (guessBrowser() !== 'firefox' && !stats.trackId) {
           continue;
         }
         var senderReportFactoryIdsToDelete = senderReportFactoryIdsToDeleteByMediaType[stats.mediaType];
@@ -58544,7 +60819,7 @@ function updateIceReport(ice, report) {
 
 /**
  * @param {PeerConnectionReportFactory} factory
- * @returns {PeerConnectionReport}
+ * @returns {Promise<PeerConnectionReport>}
  */
 function updateFirefox(factory) {
   var senders = factory.pc.getTransceivers().filter(function (transceiver) {
@@ -58585,7 +60860,7 @@ function updateFirefox(factory) {
 
 /**
  * @param {PeerConnectionReportFactory} factory
- * @returns {PeerConnectionReport}
+ * @returns {Promise<PeerConnectionReport>}
  */
 function updateChrome(factory) {
   return factory.pc.getStats().then(function (report) {
@@ -59342,8 +61617,9 @@ var StatsReport =
 /**
  * @param {string} peerConnectionId - RTCPeerConnection ID
  * @param {StandardizedStatsResponse} statsResponse
+ * @param {boolean} prepareForInsights - if report is being prepared to send to insights.
  */
-function StatsReport(peerConnectionId, statsResponse) {
+function StatsReport(peerConnectionId, statsResponse, prepareForInsights) {
   _classCallCheck(this, StatsReport);
 
   if (typeof peerConnectionId !== 'string') {
@@ -59357,13 +61633,13 @@ function StatsReport(peerConnectionId, statsResponse) {
     },
     localAudioTrackStats: {
       value: statsResponse.localAudioTrackStats.map(function (report) {
-        return new LocalAudioTrackStats(report.trackId, report);
+        return new LocalAudioTrackStats(report.trackId, report, prepareForInsights);
       }),
       enumerable: true
     },
     localVideoTrackStats: {
       value: statsResponse.localVideoTrackStats.map(function (report) {
-        return new LocalVideoTrackStats(report.trackId, report);
+        return new LocalVideoTrackStats(report.trackId, report, prepareForInsights);
       }),
       enumerable: true
     },
@@ -59586,6 +61862,7 @@ var _require = __webpack_require__(/*! ./util */ "./node_modules/twilio-video/es
     makeUUID = _require.makeUUID;
 
 var Log = __webpack_require__(/*! ./util/log */ "./node_modules/twilio-video/es5/util/log.js");
+var NetworkMonitor = __webpack_require__(/*! ./util/networkmonitor */ "./node_modules/twilio-video/es5/util/networkmonitor.js");
 var Timeout = __webpack_require__(/*! ./util/timeout */ "./node_modules/twilio-video/es5/util/timeout.js");
 
 var nInstances = 0;
@@ -59594,34 +61871,67 @@ var nInstances = 0;
   TwilioConnection states
   -----------------------
 
-  +--------------+       +----------+
-  |  connecting  | ----> |  closed  |
-  +--------------+       +----------+
-         |                    ^
-         v                    |
-     +--------+               |
-     |  open  | ---------------
-     +--------+
+       ------------------------------------------
+       |                                        |
+       |                                        v
+  +---------+       +--------------+       +----------+
+  |  early  | ----> |  connecting  | ----> |  closed  |
+  +---------+       +--------------+       +----------+
+    ^                     | ^ |                 ^ ^
+    | --------------------- | |                 | |
+    | | --------------------- |                 | |
+    | | | --------------------|------------------ |
+    | v | |                   v                   |
+  +----------+           +--------+               |
+  | waiting  | --------> |  open  | ---------------
+  +----------+           +--------+
  */
 
 var states = {
   closed: [],
-  connecting: ['closed', 'open'],
-  open: ['closed']
+  connecting: ['closed', 'open', 'waiting'],
+  early: ['closed', 'connecting'],
+  open: ['closed'],
+  waiting: ['closed', 'connecting', 'early', 'open']
 };
 
+var events = {
+  closed: 'close',
+  open: 'open',
+  waiting: 'waiting'
+};
+
+var TCMP_VERSION = 2;
+
 var DEFAULT_MAX_CONSECUTIVE_MISSED_HEARTBEATS = 3;
+var DEFAULT_MAX_CONSECUTIVE_FAILED_HELLOS = 3;
 var DEFAULT_MAX_REQUESTED_HEARTBEAT_TIMEOUT = 5000;
+var DEFAULT_OPEN_TIMEOUT = 15000;
 var DEFAULT_WELCOME_TIMEOUT = 5000;
-var HEARTBEAT_TIMEOUT_OFFSET = 100;
+var OUTGOING_HEARTBEAT_OFFSET = 200;
+
 var WS_CLOSE_NORMAL = 1000;
 var WS_CLOSE_WELCOME_TIMEOUT = 3000;
 var WS_CLOSE_HEARTBEATS_MISSED = 3001;
 var WS_CLOSE_HELLO_FAILED = 3002;
 var WS_CLOSE_SEND_FAILED = 3003;
+var WS_CLOSE_NETWORK_CHANGED = 3004;
+var WS_CLOSE_BUSY_WAIT = 3005;
+var WS_CLOSE_SERVER_BUSY = 3006;
+var WS_CLOSE_OPEN_TIMEOUT = 3007;
 
 var toplevel = global.window || global;
 var WebSocket = toplevel.WebSocket ? toplevel.WebSocket : __webpack_require__(/*! ws */ "./node_modules/twilio-video/src/ws.js");
+
+var CloseReason = {
+  BUSY: 'busy',
+  FAILED: 'failed',
+  LOCAL: 'local',
+  REMOTE: 'remote',
+  TIMEOUT: 'timeout'
+};
+
+var wsCloseCodesToCloseReasons = new Map([[WS_CLOSE_WELCOME_TIMEOUT, CloseReason.TIMEOUT], [WS_CLOSE_HEARTBEATS_MISSED, CloseReason.TIMEOUT], [WS_CLOSE_HELLO_FAILED, CloseReason.FAILED], [WS_CLOSE_SEND_FAILED, CloseReason.FAILED], [WS_CLOSE_NETWORK_CHANGED, CloseReason.TIMEOUT], [WS_CLOSE_SERVER_BUSY, CloseReason.BUSY], [WS_CLOSE_OPEN_TIMEOUT, CloseReason.TIMEOUT]]);
 
 /**
  * A {@link TwilioConnection} represents a WebSocket connection
@@ -59630,6 +61940,7 @@ var WebSocket = toplevel.WebSocket ? toplevel.WebSocket : __webpack_require__(/*
  * @fires TwilioConnection#error
  * @fires TwilioConnection#message
  * @fires TwilioConnection#open
+ * @fires TwilioConnection#waiting
  */
 
 var TwilioConnection = function (_StateMachine) {
@@ -59643,26 +61954,52 @@ var TwilioConnection = function (_StateMachine) {
   function TwilioConnection(serverUrl, options) {
     _classCallCheck(this, TwilioConnection);
 
-    var _this = _possibleConstructorReturn(this, (TwilioConnection.__proto__ || Object.getPrototypeOf(TwilioConnection)).call(this, 'connecting', states));
+    var _this = _possibleConstructorReturn(this, (TwilioConnection.__proto__ || Object.getPrototypeOf(TwilioConnection)).call(this, 'early', states));
 
     options = Object.assign({
+      helloBody: null,
+      maxConsecutiveFailedHellos: DEFAULT_MAX_CONSECUTIVE_FAILED_HELLOS,
       maxConsecutiveMissedHeartbeats: DEFAULT_MAX_CONSECUTIVE_MISSED_HEARTBEATS,
       requestedHeartbeatTimeout: DEFAULT_MAX_REQUESTED_HEARTBEAT_TIMEOUT,
+      openTimeout: DEFAULT_OPEN_TIMEOUT,
       welcomeTimeout: DEFAULT_WELCOME_TIMEOUT,
       Log: Log,
       WebSocket: WebSocket
     }, options);
 
     var logLevels = buildLogLevels(options.logLevel);
-    var log = new options.Log('default', _this, logLevels);
+    var log = new options.Log('default', _this, logLevels, options.loggerName);
+
+    var networkMonitor = options.networkMonitor ? new NetworkMonitor(function () {
+      var type = networkMonitor.type;
+
+      var reason = 'Network changed' + (type ? ' to ' + type : '');
+      log.debug(reason);
+      _this._close({ code: WS_CLOSE_NETWORK_CHANGED, reason: reason });
+    }) : null;
 
     Object.defineProperties(_this, {
+      _busyWaitTimeout: {
+        value: null,
+        writable: true
+      },
       _consecutiveHeartbeatsMissed: {
         value: 0,
         writable: true
       },
+      _cookie: {
+        value: null,
+        writable: true
+      },
+      _eventObserver: {
+        value: options.eventObserver
+      },
       _heartbeatTimeout: {
         value: null,
+        writable: true
+      },
+      _hellosLeft: {
+        value: options.maxConsecutiveFailedHellos,
         writable: true
       },
       _instanceId: {
@@ -59674,12 +62011,22 @@ var TwilioConnection = function (_StateMachine) {
       _messageQueue: {
         value: []
       },
+      _networkMonitor: {
+        value: networkMonitor
+      },
       _options: {
         value: options
+      },
+      _openTimeout: {
+        value: null,
+        writable: true
       },
       _sendHeartbeatTimeout: {
         value: null,
         writable: true
+      },
+      _serverUrl: {
+        value: serverUrl
       },
       _welcomeTimeout: {
         value: null,
@@ -59691,18 +62038,34 @@ var TwilioConnection = function (_StateMachine) {
       }
     });
 
-    _this.on('stateChanged', function (state, error) {
-      return {
-        closed: function closed() {
-          return _this.emit('close', error);
-        },
-        open: function open() {
-          return _this.emit('open');
-        }
-      }[state]();
+    var eventsToLevels = {
+      connecting: 'info',
+      early: 'info',
+      open: 'info',
+      waiting: 'warning',
+      closed: 'info'
+    };
+
+    _this.on('stateChanged', function (state) {
+      for (var _len = arguments.length, args = Array(_len > 1 ? _len - 1 : 0), _key = 1; _key < _len; _key++) {
+        args[_key - 1] = arguments[_key];
+      }
+
+      if (state in events) {
+        _this.emit.apply(_this, [events[state]].concat(args));
+      }
+      var event = { name: state, group: 'signaling', level: eventsToLevels[_this.state] };
+      if (state === 'closed') {
+        var reason = args[0];
+
+        event.payload = { reason: reason };
+        event.level = reason === CloseReason.LOCAL ? 'info' : 'error';
+      }
+      _this._eventObserver.emit('event', event);
     });
 
-    _this._connect(serverUrl);
+    _this._eventObserver.emit('event', { name: _this.state, group: 'signaling', level: eventsToLevels[_this.state] });
+    _this._connect();
     return _this;
   }
 
@@ -59713,25 +62076,22 @@ var TwilioConnection = function (_StateMachine) {
     }
 
     /**
-     * The number of consecutive "hearbeat" messages missed.
-     * @property {number}
-     */
-
-  }, {
-    key: '_close',
-
-
-    /**
      * Close the {@link TwilioConnection}.
      * @param {{code: number, reason: string}} event
      * @private
      */
+
+  }, {
+    key: '_close',
     value: function _close(_ref) {
       var code = _ref.code,
           reason = _ref.reason;
 
       if (this.state === 'closed') {
         return;
+      }
+      if (this._openTimeout) {
+        this._openTimeout.clear();
       }
       if (this._welcomeTimeout) {
         this._welcomeTimeout.clear();
@@ -59742,19 +62102,27 @@ var TwilioConnection = function (_StateMachine) {
       if (this._sendHeartbeatTimeout) {
         this._sendHeartbeatTimeout.clear();
       }
+      if (this._networkMonitor) {
+        this._networkMonitor.stop();
+      }
+      if (this._busyWaitTimeout && code !== WS_CLOSE_BUSY_WAIT) {
+        this._busyWaitTimeout.clear();
+      }
       this._messageQueue.splice(0);
-
       var log = this._log;
+
       if (code === WS_CLOSE_NORMAL) {
         log.debug('Closed');
+        this.transition('closed', null, [CloseReason.LOCAL]);
       } else {
         log.warn('Closed: ' + code + ' - ' + reason);
+        if (code !== WS_CLOSE_BUSY_WAIT) {
+          this.transition('closed', null, [wsCloseCodesToCloseReasons.get(code) || CloseReason.REMOTE]);
+        }
       }
-
-      this.transition('closed', null, code !== WS_CLOSE_NORMAL ? new Error('WebSocket Error ' + code + ': ' + reason) : null);
-
       var readyState = this._ws.readyState;
       var WebSocket = this._options.WebSocket;
+
 
       if (readyState !== WebSocket.CLOSING && readyState !== WebSocket.CLOSED) {
         this._ws.close(code, reason);
@@ -59763,22 +62131,43 @@ var TwilioConnection = function (_StateMachine) {
 
     /**
      * Connect to the TCMP server.
-     * @param {string} serverUrl
      * @private
      */
 
   }, {
     key: '_connect',
-    value: function _connect(serverUrl) {
+    value: function _connect() {
       var _this2 = this;
 
-      this._ws = new this._options.WebSocket(serverUrl);
       var log = this._log;
+      if (this.state === 'waiting') {
+        this.transition('early');
+      } else if (this.state !== 'early') {
+        log.warn('Unexpected state "' + this.state + '" for connecting to the' + ' TCMP server.');
+        return;
+      }
+      this._ws = new this._options.WebSocket(this._serverUrl);
       var ws = this._ws;
-
       log.debug('Created a new WebSocket:', ws);
       ws.addEventListener('close', function (event) {
         return _this2._close(event);
+      });
+
+      var openTimeout = this._options.openTimeout;
+      // Add a timeout for getting the onopen event on the WebSocket (15 sec). After that, attempt to reconnect only if this is not the first attempt.
+
+      this._openTimeout = new Timeout(function () {
+        var reason = 'Failed to open in ' + openTimeout + ' ms';
+        _this2._close({ code: WS_CLOSE_OPEN_TIMEOUT, reason: reason });
+      }, openTimeout);
+
+      ws.addEventListener('open', function () {
+        log.debug('WebSocket opened:', ws);
+        _this2._openTimeout.clear();
+        _this2._startHandshake();
+        if (_this2._networkMonitor) {
+          _this2._networkMonitor.start();
+        }
       });
 
       ws.addEventListener('message', function (message) {
@@ -59789,18 +62178,24 @@ var TwilioConnection = function (_StateMachine) {
           _this2.emit('error', error);
           return;
         }
+
         switch (message.type) {
           case 'bad':
             _this2._handleBad(message);
             break;
+          case 'busy':
+            _this2._handleBusy(message);
+            break;
           case 'bye':
             // Do nothing.
             break;
-          case 'heartbeat':
-            _this2._handleHeartbeat();
-            break;
           case 'msg':
             _this2._handleMessage(message);
+          // NOTE(mpatwardhan): Each incoming message should be treated as an incoming
+          // heartbeat intentionally falling through to 'heartbeat' case.
+          // eslint-disable-next-line no-fallthrough
+          case 'heartbeat':
+            _this2._handleHeartbeat();
             break;
           case 'welcome':
             _this2._handleWelcome(message);
@@ -59810,16 +62205,6 @@ var TwilioConnection = function (_StateMachine) {
             _this2.emit('error', new Error('Unknown message type: ' + message.type));
             break;
         }
-      });
-
-      ws.addEventListener('open', function () {
-        log.debug('WebSocket opened:', ws);
-        _this2._sendHello();
-        var welcomeTimeout = _this2._options.welcomeTimeout;
-
-        _this2._welcomeTimeout = new Timeout(function () {
-          return _this2._handleWelcomeTimeout();
-        }, welcomeTimeout);
       });
     }
 
@@ -59835,6 +62220,10 @@ var TwilioConnection = function (_StateMachine) {
       var reason = _ref2.reason;
 
       var log = this._log;
+      if (!['connecting', 'open'].includes(this.state)) {
+        log.warn('Unexpected state "' + this.state + '" for handling a "bad" message' + ' from the TCMP server.');
+        return;
+      }
       if (this.state === 'connecting') {
         log.warn('Closing: ' + WS_CLOSE_HELLO_FAILED + ' - ' + reason);
         this._close({ code: WS_CLOSE_HELLO_FAILED, reason: reason });
@@ -59842,6 +62231,60 @@ var TwilioConnection = function (_StateMachine) {
       }
       log.debug('Error: ' + reason);
       this.emit('error', new Error(reason));
+    }
+
+    /**
+     * Handle an incoming "busy" message.
+     * @param {{cookie: ?string, keepAlive: boolean, retryAfter: number}} message
+     * @private
+     */
+
+  }, {
+    key: '_handleBusy',
+    value: function _handleBusy(_ref3) {
+      var _this3 = this;
+
+      var cookie = _ref3.cookie,
+          keepAlive = _ref3.keepAlive,
+          retryAfter = _ref3.retryAfter;
+
+      var log = this._log;
+      if (!['connecting', 'waiting'].includes(this.state)) {
+        log.warn('Unexpected state "' + this.state + '" for handling a "busy" message' + ' from the TCMP server.');
+        return;
+      }
+      if (this._busyWaitTimeout) {
+        this._busyWaitTimeout.clear();
+      }
+      if (this._welcomeTimeout) {
+        this._welcomeTimeout.clear();
+      }
+      var reason = retryAfter < 0 ? 'Received terminal "busy" message' : 'Received "busy" message, retrying after ' + retryAfter + ' ms';
+
+      if (retryAfter < 0) {
+        log.warn('Closing: ' + WS_CLOSE_SERVER_BUSY + ' - ' + reason);
+        this._close({ code: WS_CLOSE_SERVER_BUSY, reason: reason });
+        return;
+      }
+      var maxConsecutiveFailedHellos = this._options.maxConsecutiveFailedHellos;
+
+      this._hellosLeft = maxConsecutiveFailedHellos;
+      this._cookie = cookie || null;
+
+      if (keepAlive) {
+        log.warn(reason);
+        this._busyWaitTimeout = new Timeout(function () {
+          return _this3._startHandshake();
+        }, retryAfter);
+      } else {
+        log.warn('Closing: ' + WS_CLOSE_BUSY_WAIT + ' - ' + reason);
+        this._close({ code: WS_CLOSE_BUSY_WAIT, reason: reason });
+        this._busyWaitTimeout = new Timeout(function () {
+          return _this3._connect();
+        }, retryAfter);
+      }
+
+      this.transition('waiting', null, [keepAlive, retryAfter]);
     }
 
     /**
@@ -59853,9 +62296,9 @@ var TwilioConnection = function (_StateMachine) {
     key: '_handleHeartbeat',
     value: function _handleHeartbeat() {
       if (this.state !== 'open') {
+        this._log.warn('Unexpected state "' + this.state + '" for handling a "heartbeat"' + ' message from the TCMP server.');
         return;
       }
-      this._consecutiveHeartbeatsMissed = 0;
       this._heartbeatTimeout.reset();
     }
 
@@ -59870,17 +62313,11 @@ var TwilioConnection = function (_StateMachine) {
       if (this.state !== 'open') {
         return;
       }
-      this._consecutiveHeartbeatsMissed++;
       var log = this._log;
       var maxConsecutiveMissedHeartbeats = this._options.maxConsecutiveMissedHeartbeats;
 
 
-      log.debug('Consecutive heartbeats missed: ' + this._consecutiveHeartbeatsMissed);
-      if (this._consecutiveHeartbeatsMissed < maxConsecutiveMissedHeartbeats) {
-        this._heartbeatTimeout.reset();
-        return;
-      }
-
+      log.debug('Consecutive heartbeats missed: ' + maxConsecutiveMissedHeartbeats);
       var reason = 'Missed ' + maxConsecutiveMissedHeartbeats + ' "heartbeat" messages';
       log.warn('Closing: ' + WS_CLOSE_HEARTBEATS_MISSED + ' - ' + reason);
       this._close({ code: WS_CLOSE_HEARTBEATS_MISSED, reason: reason });
@@ -59894,10 +62331,11 @@ var TwilioConnection = function (_StateMachine) {
 
   }, {
     key: '_handleMessage',
-    value: function _handleMessage(_ref3) {
-      var body = _ref3.body;
+    value: function _handleMessage(_ref4) {
+      var body = _ref4.body;
 
       if (this.state !== 'open') {
+        this._log.warn('Unexpected state "' + this.state + '" for handling a "msg" message' + ' from the TCMP server.');
         return;
       }
       this.emit('message', body);
@@ -59911,25 +62349,38 @@ var TwilioConnection = function (_StateMachine) {
 
   }, {
     key: '_handleWelcome',
-    value: function _handleWelcome(_ref4) {
-      var _this3 = this;
+    value: function _handleWelcome(_ref5) {
+      var _this4 = this;
 
-      var negotiatedTimeout = _ref4.negotiatedTimeout;
+      var negotiatedTimeout = _ref5.negotiatedTimeout;
 
-      if (this.state !== 'connecting') {
+      var log = this._log;
+
+      if (!['connecting', 'waiting'].includes(this.state)) {
+        log.warn('Unexpected state "' + this.state + '" for handling a "welcome"' + ' message from the TCMP server.');
         return;
       }
-      var heartbeatTimeout = negotiatedTimeout + HEARTBEAT_TIMEOUT_OFFSET;
+
+      if (this.state === 'waiting') {
+        log.debug('Received "welcome" message, no need to retry connection.');
+        this._busyWaitTimeout.clear();
+      }
+
+      var maxConsecutiveMissedHeartbeats = this._options.maxConsecutiveMissedHeartbeats;
+
+      var heartbeatTimeout = negotiatedTimeout * maxConsecutiveMissedHeartbeats;
+      var outgoingHeartbeatTimeout = negotiatedTimeout - OUTGOING_HEARTBEAT_OFFSET;
+
       this._welcomeTimeout.clear();
       this._heartbeatTimeout = new Timeout(function () {
-        return _this3._handleHeartbeatTimeout();
+        return _this4._handleHeartbeatTimeout();
       }, heartbeatTimeout);
       this._messageQueue.splice(0).forEach(function (message) {
-        return _this3._send(message);
+        return _this4._send(message);
       });
       this._sendHeartbeatTimeout = new Timeout(function () {
-        return _this3._sendHeartbeat();
-      }, negotiatedTimeout);
+        return _this4._sendHeartbeat();
+      }, outgoingHeartbeatTimeout);
       this.transition('open');
     }
 
@@ -59944,9 +62395,19 @@ var TwilioConnection = function (_StateMachine) {
       if (this.state !== 'connecting') {
         return;
       }
-      var reason = '"welcome" message timeout expired';
-      this._log.warn('Closing: ' + WS_CLOSE_WELCOME_TIMEOUT + ' - ' + reason);
-      this._close({ code: WS_CLOSE_WELCOME_TIMEOUT, reason: reason });
+      var log = this._log;
+
+      if (this._hellosLeft <= 0) {
+        var reason = 'All handshake attempts failed';
+        log.warn('Closing: ' + WS_CLOSE_WELCOME_TIMEOUT + ' - ' + reason);
+        this._close({ code: WS_CLOSE_WELCOME_TIMEOUT, reason: reason });
+        return;
+      }
+
+      var maxConsecutiveFailedHellos = this._options.maxConsecutiveFailedHellos;
+
+      log.warn('Handshake attempt ' + (maxConsecutiveFailedHellos - this._hellosLeft) + ' failed');
+      this._startHandshake();
     }
 
     /**
@@ -59966,6 +62427,10 @@ var TwilioConnection = function (_StateMachine) {
         this._log.debug('Outgoing: ' + data);
         try {
           this._ws.send(data);
+          if (this._sendHeartbeatTimeout) {
+            // Each outgoing message is to be treated as an outgoing heartbeat.
+            this._sendHeartbeatTimeout.reset();
+          }
         } catch (error) {
           var reason = 'Failed to send message';
           this._log.warn('Closing: ' + WS_CLOSE_SEND_FAILED + ' - ' + reason);
@@ -59986,7 +62451,6 @@ var TwilioConnection = function (_StateMachine) {
         return;
       }
       this._send({ type: 'heartbeat' });
-      this._sendHeartbeatTimeout.reset();
     }
 
     /**
@@ -59997,13 +62461,23 @@ var TwilioConnection = function (_StateMachine) {
   }, {
     key: '_sendHello',
     value: function _sendHello() {
-      var requestedHeartbeatTimeout = this._options.requestedHeartbeatTimeout;
+      var _options = this._options,
+          helloBody = _options.helloBody,
+          timeout = _options.requestedHeartbeatTimeout;
 
-      this._send({
+      var hello = {
         id: makeUUID(),
-        timeout: requestedHeartbeatTimeout,
-        type: 'hello'
-      });
+        timeout: timeout,
+        type: 'hello',
+        version: TCMP_VERSION
+      };
+      if (this._cookie) {
+        hello.cookie = this._cookie;
+      }
+      if (helloBody) {
+        hello.body = helloBody;
+      }
+      this._send(hello);
     }
 
     /**
@@ -60015,18 +62489,43 @@ var TwilioConnection = function (_StateMachine) {
   }, {
     key: '_sendOrEnqueue',
     value: function _sendOrEnqueue(message) {
-      var _this4 = this;
+      var _this5 = this;
 
       if (this.state === 'closed') {
         return;
       }
       var sendOrEnqueue = this.state === 'open' ? function (message) {
-        return _this4._send(message);
+        return _this5._send(message);
       } : function (message) {
-        return _this4._messageQueue.push(message);
+        return _this5._messageQueue.push(message);
       };
 
       sendOrEnqueue(message);
+    }
+
+    /**
+     * Start the TCMP handshake.
+     * @private
+     */
+
+  }, {
+    key: '_startHandshake',
+    value: function _startHandshake() {
+      var _this6 = this;
+
+      if (['early', 'waiting'].includes(this.state)) {
+        this.transition('connecting');
+      }
+      if (this.state !== 'connecting') {
+        return;
+      }
+      this._hellosLeft--;
+      this._sendHello();
+      var welcomeTimeout = this._options.welcomeTimeout;
+
+      this._welcomeTimeout = new Timeout(function () {
+        return _this6._handleWelcomeTimeout();
+      }, welcomeTimeout);
     }
 
     /**
@@ -60041,7 +62540,7 @@ var TwilioConnection = function (_StateMachine) {
         return;
       }
       this._sendOrEnqueue({ type: 'bye' });
-      this._ws.close(WS_CLOSE_NORMAL);
+      this._close({ code: WS_CLOSE_NORMAL, reason: 'Normal' });
     }
 
     /**
@@ -60055,20 +62554,23 @@ var TwilioConnection = function (_StateMachine) {
     value: function sendMessage(body) {
       this._sendOrEnqueue({ body: body, type: 'msg' });
     }
-  }, {
-    key: 'consecutiveHeartbeatsMissed',
-    get: function get() {
-      return this._consecutiveHeartbeatsMissed;
-    }
   }]);
 
   return TwilioConnection;
 }(StateMachine);
 
 /**
+ * A unique string depicting the reason for the {@link TwilioConnection} being closed.
+ * @enum {string}
+ */
+
+
+TwilioConnection.CloseReason = CloseReason;
+
+/**
  * A {@link TwilioConnection} was closed.
  * @event TwilioConnection#close
- * @param {?Error} error - If closed by the client, then this is null
+ * @param {CloseReason} reason - The reason for the {@link TwilioConnection} being closed
  */
 
 /**
@@ -60089,10 +62591,20 @@ var TwilioConnection = function (_StateMachine) {
  */
 
 /**
+ * A {@link TwilioConnection} received a "busy" message from the TCMP server.
+ * @event TwilioConnection#waiting
+ * @param {boolean} keepAlive - true if the WebSocket connection is retained
+ * @param {number} retryAfter - delay in milliseconds after which a retry is attempted
+ */
+
+/**
  * {@link TwilioConnection} options
  * @typedef {object} TwilioConnectionOptions
+ * @property {EventObserver} [eventObserver] - Optional event observer
+ * @property {*} [helloBody=null] - Optional body for "hello" message
  * @property {LogLevel} [logLevel=warn] - Log level of the {@link TwilioConnection}
- * @property {number} [maxConsecutiveMissedHeartbeats=5] - Max. number of consecutive "heartbeat" messages that can be missed
+ * @property {number} [maxConsecutiveFailedHellos=3] - Max. number of consecutive failed "hello"s
+ * @property {number} [maxConsecutiveMissedHeartbeats=3] - Max. number of (effective) consecutive "heartbeat" messages that can be missed
  * @property {number} [requestedHeartbeatTimeout=5000] - "heartbeat" timeout (ms) requested by the {@link TwilioConnection}
  * @property {number} [welcomeTimeout=5000] - Time (ms) to wait for the "welcome" message after sending the "hello" message
  */
@@ -60372,39 +62884,14 @@ module.exports.DEFAULT_ENVIRONMENT = 'prod';
 module.exports.DEFAULT_REALM = 'us1';
 module.exports.DEFAULT_REGION = 'gll';
 module.exports.DEFAULT_LOG_LEVEL = 'warn';
+module.exports.DEFAULT_LOGGER_NAME = 'twilio-video';
 module.exports.WS_SERVER = function (environment, region) {
   region = region === 'gll' ? 'global' : encodeURIComponent(region);
   return environment === 'prod' ? 'wss://' + region + '.vss.twilio.com/signaling' : 'wss://' + region + '.vss.' + environment + '.twilio.com/signaling';
 };
-module.exports.ECS_SERVER = function (environment, realm) {
-  switch (environment) {
-    case 'prod':
-      return 'https://ecs.' + realm + '.twilio.com';
-    default:
-      return 'https://ecs.' + environment + '-' + realm + '.twilio.com';
-  }
-};
-module.exports.ECS_TIMEOUT = 60;
 module.exports.PUBLISH_MAX_ATTEMPTS = 5;
 module.exports.PUBLISH_BACKOFF_JITTER = 10;
 module.exports.PUBLISH_BACKOFF_MS = 20;
-
-module.exports.ICE_SERVERS_TIMEOUT_MS = 3000;
-module.exports.ICE_SERVERS_DEFAULT_TTL = 3600;
-module.exports.DEFAULT_ICE_SERVERS = function (environment) {
-  switch (environment) {
-    case 'prod':
-      return [{ urls: 'stun:global.stun.twilio.com:3478?transport=udp' }];
-    default:
-      return [{ urls: 'stun:global.stun.' + environment + '.twilio.com:3478?transport=udp' }];
-  }
-};
-
-// Headers
-/* eslint key-spacing:0 */
-module.exports.headers = {
-  X_TWILIO_ACCESSTOKEN: 'X-Twilio-AccessToken'
-};
 
 /**
  * Returns the appropriate indefinite article ("a" | "an").
@@ -60419,6 +62906,9 @@ function article(word) {
 }
 
 module.exports.typeErrors = {
+  ILLEGAL_INVOKE: function ILLEGAL_INVOKE(name, context) {
+    return new TypeError('Illegal call to ' + name + ': ' + context);
+  },
   INVALID_TYPE: function INVALID_TYPE(name, type) {
     return new TypeError(name + ' must be ' + article(type) + ' ' + type);
   },
@@ -60430,12 +62920,28 @@ module.exports.typeErrors = {
   }
 };
 
+module.exports.DEFAULT_ICE_GATHERING_TIMEOUT_MS = 15000;
+module.exports.DEFAULT_SESSION_TIMEOUT_SEC = 30;
+
 module.exports.DEFAULT_NQ_LEVEL_LOCAL = 1;
 module.exports.DEFAULT_NQ_LEVEL_REMOTE = 0;
 module.exports.MAX_NQ_LEVEL = 3;
 
 module.exports.ICE_ACTIVITY_CHECK_PERIOD_MS = 1000;
 module.exports.ICE_INACTIVITY_THRESHOLD_MS = 3000;
+
+module.exports.iceRestartBackoffConfig = {
+  factor: 1.1,
+  initialDelay: 1,
+  maxDelay: module.exports.DEFAULT_SESSION_TIMEOUT_SEC * 1000,
+  randomisationFactor: 0.5
+};
+
+module.exports.reconnectBackoffConfig = {
+  factor: 1.5,
+  initialDelay: 80,
+  randomisationFactor: 0.5
+};
 
 module.exports.subscriptionMode = {
   MODE_COLLABORATION: 'collaboration',
@@ -60454,6 +62960,443 @@ module.exports.trackPriority = {
   PRIORITY_LOW: 'low',
   PRIORITY_STANDARD: 'standard'
 };
+
+/***/ }),
+
+/***/ "./node_modules/twilio-video/es5/util/detectsilentaudio.js":
+/*!*****************************************************************!*\
+  !*** ./node_modules/twilio-video/es5/util/detectsilentaudio.js ***!
+  \*****************************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var detectSilence = __webpack_require__(/*! ../webaudio/detectsilence */ "./node_modules/twilio-video/es5/webaudio/detectsilence.js");
+
+var N_ATTEMPTS = 3;
+var ATTEMPT_DURATION_MS = 250;
+
+/**
+ * Detect whether the audio stream rendered by the given HTMLVideoElement is silent.
+ * @param {HTMLAudioElement} el
+ * @returns {Promise<boolean>} true if silent, false if not.
+ */
+function detectSilentAudio(el) {
+  // NOTE(mmalavalli): We have to delay require-ing AudioContextFactory, because
+  // it exports a default instance whose constructor calls Object.assign.
+  var AudioContextFactory = __webpack_require__(/*! ../webaudio/audiocontext */ "./node_modules/twilio-video/es5/webaudio/audiocontext.js");
+  var holder = {};
+  var audioContext = AudioContextFactory.getOrCreate(holder);
+
+  var attemptsLeft = N_ATTEMPTS;
+
+  function doCheckSilence() {
+    attemptsLeft--;
+    return detectSilence(audioContext, el.srcObject, ATTEMPT_DURATION_MS).then(function (isSilent) {
+      if (!isSilent) {
+        return false;
+      }
+      if (attemptsLeft > 0) {
+        return doCheckSilence();
+      }
+      return true;
+    }).catch(function () {
+      // NOTE(mmalavalli): If an error is thrown while detect silence, the audio
+      // stream is assumed to be silent.
+      return true;
+    });
+  }
+
+  // Resolve the returned Promise with true if 3 consecutive attempts
+  // to detect silent audio are successful.
+  return doCheckSilence().finally(function () {
+    AudioContextFactory.release(holder);
+  });
+}
+
+module.exports = detectSilentAudio;
+
+/***/ }),
+
+/***/ "./node_modules/twilio-video/es5/util/detectsilentvideo.js":
+/*!*****************************************************************!*\
+  !*** ./node_modules/twilio-video/es5/util/detectsilentvideo.js ***!
+  \*****************************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+// Cached copy of the <canvas> used to check silent video frames.
+
+var canvas = null;
+
+var N_SAMPLES = 3;
+var SAMPLE_HEIGHT = 50;
+var SAMPLE_INTERVAL_MS = 250;
+var SAMPLE_WIDTH = 50;
+
+/**
+ * Check whether the current video frame is silent by selecting a 50x50
+ * sample and calculating the max value of the pixel data. If it is 0, then
+ * the frame is considered to be silent.
+ * @private
+ * @param {HTMLVideoElement} el
+ * @returns {boolean} true if silent, false if not
+ */
+function checkSilence(el) {
+  var context = canvas.getContext('2d');
+  context.drawImage(el, 0, 0, SAMPLE_WIDTH, SAMPLE_HEIGHT);
+  var frame = context.getImageData(0, 0, SAMPLE_WIDTH, SAMPLE_HEIGHT);
+  var frameDataWithoutAlpha = frame.data.filter(function (item, i) {
+    return (i + 1) % 4;
+  });
+  var max = Math.max.apply(Math, frameDataWithoutAlpha);
+  return max === 0;
+}
+
+/**
+ * Detect whether the video stream rendered by the given HTMLVideoElement is silent.
+ * @param {HTMLVideoElement} el
+ * @returns {Promise<boolean>} true if silent, false if not.
+ */
+function detectSilentVideo(el) {
+  // Create the canvas when detectSilentVideo() is called for the
+  // first time.
+  canvas = canvas || document.createElement('canvas');
+
+  // Resolve the returned Promise with true if 3 consecutive sample
+  // frames from the video being played by the HTMLVideoElement are
+  // silent.
+  return new Promise(function (resolve) {
+    var samplesLeft = N_SAMPLES;
+    setTimeout(function doCheckSilence() {
+      samplesLeft--;
+      if (!checkSilence(el)) {
+        return resolve(false);
+      }
+      if (samplesLeft > 0) {
+        return setTimeout(doCheckSilence, SAMPLE_INTERVAL_MS);
+      }
+      return resolve(true);
+    }, SAMPLE_INTERVAL_MS);
+  });
+}
+
+module.exports = detectSilentVideo;
+
+/***/ }),
+
+/***/ "./node_modules/twilio-video/es5/util/documentvisibilitymonitor.js":
+/*!*************************************************************************!*\
+  !*** ./node_modules/twilio-video/es5/util/documentvisibilitymonitor.js ***!
+  \*************************************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+/**
+ * The {@link DocumentVisibilityMonitor} monitors the visibility state of the DOM
+ * and executes the attached listeners in phase order when the DOM is visible.
+ */
+
+var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
+
+function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
+
+var DocumentVisibilityMonitor = function () {
+  /**
+   * Constructor.
+   * @param {number} [nPhases=1] - the number of phases
+   */
+  function DocumentVisibilityMonitor() {
+    var _this = this;
+
+    var nPhases = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : 1;
+
+    _classCallCheck(this, DocumentVisibilityMonitor);
+
+    Object.defineProperties(this, {
+      _listeners: {
+        value: []
+      },
+      _onVisibilityChange: {
+        value: function value() {
+          if (document.visibilityState === 'visible') {
+            _this._emitVisible();
+          }
+        }
+      }
+    });
+
+    for (var i = 0; i < nPhases; i++) {
+      this._listeners.push([]);
+    }
+  }
+
+  _createClass(DocumentVisibilityMonitor, [{
+    key: '_listenerCount',
+    value: function _listenerCount() {
+      return this._listeners.reduce(function (count, phaseListeners) {
+        return count + phaseListeners.length;
+      }, 0);
+    }
+
+    /**
+     * Call all the listeners. Makes sure that all listeners for a given phase
+     * are executed before calling the listeners of the next phase.
+     * @private
+     */
+
+  }, {
+    key: '_emitVisible',
+    value: function _emitVisible() {
+      var _this2 = this;
+
+      var promise = Promise.resolve();
+
+      var _loop = function _loop(phase) {
+        promise = promise.then(function () {
+          return _this2._emitVisiblePhase(phase);
+        });
+      };
+
+      for (var phase = 1; phase <= this._listeners.length; phase++) {
+        _loop(phase);
+      }
+      return promise;
+    }
+
+    /**
+     * Call all the listeners for a given phase.
+     * @private
+     */
+
+  }, {
+    key: '_emitVisiblePhase',
+    value: function _emitVisiblePhase(phase) {
+      var phaseListeners = this._listeners[phase - 1];
+      return Promise.all(phaseListeners.map(function (listener) {
+        var ret = listener();
+        return ret instanceof Promise ? ret : Promise.resolve(ret);
+      }));
+    }
+
+    /**
+     * Start listening to the DOM visibility state change.
+     * @private
+     */
+
+  }, {
+    key: '_start',
+    value: function _start() {
+      document.addEventListener('visibilitychange', this._onVisibilityChange);
+    }
+
+    /**
+     * Stop listening to the DOM visibility state change.
+     * @private
+     */
+
+  }, {
+    key: '_stop',
+    value: function _stop() {
+      document.removeEventListener('visibilitychange', this._onVisibilityChange);
+    }
+
+    /**
+     * Listen for the DOM to be visible at the given phase.
+     * @param {number} phase
+     * @param {function} listener
+     * @returns {this}
+     */
+
+  }, {
+    key: 'onVisible',
+    value: function onVisible(phase, listener) {
+      if (typeof phase !== 'number' || phase <= 0 || phase > this._listeners.length) {
+        throw new Error('invalid phase: ', phase);
+      }
+      var phaseListeners = this._listeners[phase - 1];
+      phaseListeners.push(listener);
+      if (this._listenerCount() === 1) {
+        this._start();
+      }
+      return this;
+    }
+
+    /**
+     * Stop listening for the DOM to be visible at the given phase.
+     * @param {number} phase
+     * @param {function} listener
+     * @returns {this}
+     */
+
+  }, {
+    key: 'offVisible',
+    value: function offVisible(phase, listener) {
+      if (typeof phase !== 'number' || phase <= 0 || phase > this._listeners.length) {
+        throw new Error('invalid phase: ', phase);
+      }
+
+      var phaseListeners = this._listeners[phase - 1];
+      var index = phaseListeners.indexOf(listener);
+      if (index !== -1) {
+        phaseListeners.splice(index, 1);
+        if (this._listenerCount() === 0) {
+          this._stop();
+        }
+      }
+      return this;
+    }
+  }]);
+
+  return DocumentVisibilityMonitor;
+}();
+
+module.exports = new DocumentVisibilityMonitor(2);
+
+/***/ }),
+
+/***/ "./node_modules/twilio-video/es5/util/eventobserver.js":
+/*!*************************************************************!*\
+  !*** ./node_modules/twilio-video/es5/util/eventobserver.js ***!
+  \*************************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+/* eslint-disable no-console */
+
+
+var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
+
+function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
+
+function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
+
+function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
+
+var _require = __webpack_require__(/*! events */ "./node_modules/events/events.js"),
+    EventEmitter = _require.EventEmitter;
+
+var VALID_GROUPS = ['signaling', 'room', 'media'];
+
+var VALID_LEVELS = ['debug', 'error', 'info', 'warning'];
+
+/**
+ * EventObserver listens to SDK events and re-emits them on the
+ * @link EventListener} with some additional information.
+ * @extends EventEmitter
+ * @emits EventObserver#event
+ */
+
+var EventObserver = function (_EventEmitter) {
+  _inherits(EventObserver, _EventEmitter);
+
+  /**
+   * Constructor.
+   * @param {number} connectTimestamp
+   * @param {log} Log
+   * @param {EventListener} eventListener
+   */
+  function EventObserver(connectTimestamp, log) {
+    var eventListener = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : null;
+
+    _classCallCheck(this, EventObserver);
+
+    var _this = _possibleConstructorReturn(this, (EventObserver.__proto__ || Object.getPrototypeOf(EventObserver)).call(this));
+
+    Object.defineProperties(_this, {
+      _publisher: {
+        value: null,
+        writable: true
+      }
+    });
+
+    _this.on('event', function (_ref) {
+      var name = _ref.name,
+          group = _ref.group,
+          level = _ref.level,
+          payload = _ref.payload;
+
+      if (typeof name !== 'string') {
+        throw new Error('Unexpected name: ', name);
+      }
+
+      if (!VALID_GROUPS.includes(group)) {
+        throw new Error('Unexpected group: ', group);
+      }
+
+      if (!VALID_LEVELS.includes(level)) {
+        throw new Error('Unexpected level: ', level);
+      }
+
+      var timestamp = Date.now();
+      var elapsedTime = timestamp - connectTimestamp;
+
+      if (_this._publisher) {
+        var publisherPayload = Object.assign(payload ? payload : {}, { elapsedTime: elapsedTime, level: level });
+        _this._publisher.publish(group, name, publisherPayload);
+      }
+      var event = Object.assign(payload ? { payload: payload } : {}, {
+        elapsedTime: elapsedTime,
+        group: group,
+        level: level,
+        name: name,
+        timestamp: timestamp
+      });
+
+      var logLevel = {
+        debug: 'debug',
+        error: 'error',
+        info: 'info',
+        warning: 'warn'
+      }[level];
+      log[logLevel]('event', event);
+
+      if (eventListener && group === 'signaling') {
+        var _event = Object.assign(payload ? { payload: payload } : {}, {
+          elapsedTime: elapsedTime,
+          group: group,
+          level: level,
+          name: name,
+          timestamp: timestamp
+        });
+        eventListener.emit('event', _event);
+      }
+    });
+    return _this;
+  }
+
+  /**
+   * sets the publisher object. Once set events will be sent to publisher.
+   * @param {InsightsPublisher} publisher
+  */
+
+
+  _createClass(EventObserver, [{
+    key: 'setPublisher',
+    value: function setPublisher(publisher) {
+      this._publisher = publisher;
+    }
+  }]);
+
+  return EventObserver;
+}(EventEmitter);
+
+/**
+ * An SDK event.
+ * @event EventObserver#event
+ * @param {{name: string, payload: *}} event
+ */
+
+module.exports = EventObserver;
 
 /***/ }),
 
@@ -61133,6 +64076,91 @@ function valueToJSON(value) {
   return value;
 }
 
+function createRoomConnectEventPayload(connectOptions) {
+  function boolToString(val) {
+    return val ? 'true' : 'false';
+  }
+  var payload = {
+    // arrays props converted to lengths.
+    iceServers: (connectOptions.iceServers || []).length,
+    audioTracks: (connectOptions.tracks || []).filter(function (track) {
+      return track.kind === 'audio';
+    }).length,
+    videoTracks: (connectOptions.tracks || []).filter(function (track) {
+      return track.kind === 'video';
+    }).length,
+    dataTracks: (connectOptions.tracks || []).filter(function (track) {
+      return track.kind === 'data';
+    }).length
+  };
+
+  // boolean properties.
+  [['audio'], ['automaticSubscription'], ['enableDscp'], ['eventListener'], ['preflight'], ['video'], ['dominantSpeaker', 'enableDominantSpeaker']].forEach(function (_ref6) {
+    var _ref7 = _slicedToArray(_ref6, 2),
+        prop = _ref7[0],
+        eventProp = _ref7[1];
+
+    eventProp = eventProp || prop;
+    payload[eventProp] = boolToString(!!connectOptions[prop]);
+  });
+
+  // numbers and string properties.
+  [['maxVideoBitrate'], ['maxAudioBitrate'], ['iceTransportPolicy'], ['region'], ['name', 'roomName']].forEach(function (_ref8) {
+    var _ref9 = _slicedToArray(_ref8, 2),
+        prop = _ref9[0],
+        eventProp = _ref9[1];
+
+    eventProp = eventProp || prop;
+    if (typeof connectOptions[prop] === 'number' || typeof connectOptions[prop] === 'string') {
+      payload[eventProp] = connectOptions[prop];
+    }
+  });
+
+  // array props stringified.
+  ['preferredAudioCodecs', 'preferredVideoCodecs'].forEach(function (prop) {
+    if (prop in connectOptions) {
+      payload[prop] = JSON.stringify(connectOptions[prop]);
+    }
+  });
+
+  if ('networkQuality' in connectOptions) {
+    payload.networkQualityConfiguration = {};
+    if (isNonArrayObject(connectOptions.networkQuality)) {
+      ['local', 'remote'].forEach(function (prop) {
+        if (typeof connectOptions.networkQuality[prop] === 'number') {
+          payload.networkQualityConfiguration[prop] = connectOptions.networkQuality[prop];
+        }
+      });
+    } else {
+      payload.networkQualityConfiguration.remote = 0;
+      payload.networkQualityConfiguration.local = connectOptions.networkQuality ? 1 : 0;
+    }
+  }
+
+  if (connectOptions.bandwidthProfile && connectOptions.bandwidthProfile.video) {
+    var videoBPOptions = connectOptions.bandwidthProfile.video || {};
+    payload.bandwidthProfileOptions = {};
+    ['mode', 'maxTracks', 'trackSwitchOffMode', 'dominantSpeakerPriority', 'maxSubscriptionBitrate'].forEach(function (prop) {
+      if (typeof videoBPOptions[prop] === 'number' || typeof videoBPOptions[prop] === 'string') {
+        if (prop in videoBPOptions) {
+          payload.bandwidthProfileOptions[prop] = videoBPOptions[prop];
+        }
+      }
+    });
+
+    if ('renderDimensions' in videoBPOptions) {
+      payload.bandwidthProfileOptions.renderDimensions = JSON.stringify(videoBPOptions.renderDimensions);
+    }
+  }
+
+  return {
+    group: 'room',
+    name: 'connect',
+    level: 'info',
+    payload: payload
+  };
+}
+
 /**
  * Create the bandwidth profile payload included in an RSP connect message.
  * @param {BandwidthProfileOptions} bandwidthProfile
@@ -61207,15 +64235,15 @@ function createRenderDimensionsPayload(renderDimensions) {
  * @returns {object}
  */
 function createRSPPayload(object, propConversions) {
-  return propConversions.reduce(function (payload, _ref6) {
-    var prop = _ref6.prop,
-        type = _ref6.type,
-        _ref6$payloadProp = _ref6.payloadProp,
-        payloadProp = _ref6$payloadProp === undefined ? prop : _ref6$payloadProp,
-        _ref6$transform = _ref6.transform,
-        transform = _ref6$transform === undefined ? function (x) {
+  return propConversions.reduce(function (payload, _ref10) {
+    var prop = _ref10.prop,
+        type = _ref10.type,
+        _ref10$payloadProp = _ref10.payloadProp,
+        payloadProp = _ref10$payloadProp === undefined ? prop : _ref10$payloadProp,
+        _ref10$transform = _ref10.transform,
+        transform = _ref10$transform === undefined ? function (x) {
       return x;
-    } : _ref6$transform;
+    } : _ref10$transform;
 
     return _typeof(object[prop]) === type ? Object.assign(_defineProperty({}, payloadProp, transform(object[prop])), payload) : payload;
   }, {});
@@ -61270,12 +64298,39 @@ function isChromeScreenShareTrack(track) {
   // NOTE(mpatwardhan): Chrome creates screen share tracks with label like: "screen:69734272*"
   // we will check for label that starts with "screen:D" where D being a digit.
   var isChrome = util.guessBrowser() === 'chrome';
-  return isChrome && track.kind === 'video' && track.label && /^screen:[0-9]+/.test(track.label);
+  return isChrome && track.kind === 'video' && track.label && (/^screen:[0-9]+/.test(track.label) || /^web-contents-media-stream:[0-9/]+/.test(track.label) || /^window:[0-9]+/.test(track.label));
+}
+
+/**
+ * Returns a promise that resolve after timeoutMS have passed.
+ * @param {number} timeoutMS - time to wait in milliseconds.
+ * @returns {Promise<void>}
+ */
+function waitForSometime() {
+  var timeoutMS = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : 10;
+
+  return new Promise(function (resolve) {
+    return setTimeout(resolve, timeoutMS);
+  });
+}
+
+/**
+ * Returns a promise that resolve after event is received
+ * @returns {Promise<void>}
+ */
+function waitForEvent(eventTarget, event) {
+  return new Promise(function (resolve) {
+    eventTarget.addEventListener(event, function onevent(e) {
+      eventTarget.removeEventListener(event, onevent);
+      resolve(e);
+    });
+  });
 }
 
 exports.constants = constants;
 exports.createBandwidthProfilePayload = createBandwidthProfilePayload;
 exports.createMediaSignalingPayload = createMediaSignalingPayload;
+exports.createRoomConnectEventPayload = createRoomConnectEventPayload;
 exports.createSubscribePayload = createSubscribePayload;
 exports.asLocalTrack = asLocalTrack;
 exports.asLocalTrackPublication = asLocalTrackPublication;
@@ -61304,6 +64359,8 @@ exports.trackPublicationClass = trackPublicationClass;
 exports.valueToJSON = valueToJSON;
 exports.withJitter = withJitter;
 exports.isChromeScreenShareTrack = isChromeScreenShareTrack;
+exports.waitForSometime = waitForSometime;
+exports.waitForEvent = waitForEvent;
 
 /***/ }),
 
@@ -61711,6 +64768,103 @@ module.exports = InsightsPublisher;
 
 /***/ }),
 
+/***/ "./node_modules/twilio-video/es5/util/localmediarestartdeferreds.js":
+/*!**************************************************************************!*\
+  !*** ./node_modules/twilio-video/es5/util/localmediarestartdeferreds.js ***!
+  \**************************************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
+
+function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
+
+var _require = __webpack_require__(/*! ./ */ "./node_modules/twilio-video/es5/util/index.js"),
+    defer = _require.defer;
+
+/**
+ * This is a pair of Deferreds that are set whenever local media is muted and
+ * resolved whenever local media is unmuted/ended and restarted if necessary.
+ */
+
+
+var LocalMediaRestartDeferreds = function () {
+  /**
+   * Constructor.
+   */
+  function LocalMediaRestartDeferreds() {
+    _classCallCheck(this, LocalMediaRestartDeferreds);
+
+    Object.defineProperties(this, {
+      _audio: {
+        value: defer(),
+        writable: true
+      },
+      _video: {
+        value: defer(),
+        writable: true
+      }
+    });
+
+    // Initially, resolve both the Deferreds.
+    this._audio.resolve();
+    this._video.resolve();
+  }
+
+  /**
+   * Resolve the Deferred for audio or video.
+   * @param {'audio'|'video'} kind
+   */
+
+
+  _createClass(LocalMediaRestartDeferreds, [{
+    key: 'resolveDeferred',
+    value: function resolveDeferred(kind) {
+      if (kind === 'audio') {
+        this._audio.resolve();
+      } else {
+        this._video.resolve();
+      }
+    }
+
+    /**
+     * Start the Deferred for audio or video.
+     * @param {'audio' | 'video'} kind
+     */
+
+  }, {
+    key: 'startDeferred',
+    value: function startDeferred(kind) {
+      if (kind === 'audio') {
+        this._audio = defer();
+      } else {
+        this._video = defer();
+      }
+    }
+
+    /**
+     * Wait until the Deferred for audio or video is resolved.
+     * @param {'audio'|'video'} kind
+     * @returns {Promise<void>}
+     */
+
+  }, {
+    key: 'whenResolved',
+    value: function whenResolved(kind) {
+      return kind === 'audio' ? this._audio.promise : this._video.promise;
+    }
+  }]);
+
+  return LocalMediaRestartDeferreds;
+}();
+
+module.exports = new LocalMediaRestartDeferreds();
+
+/***/ }),
+
 /***/ "./node_modules/twilio-video/es5/util/log.js":
 /*!***************************************************!*\
   !*** ./node_modules/twilio-video/es5/util/log.js ***!
@@ -61719,17 +64873,22 @@ module.exports = InsightsPublisher;
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
-/* eslint new-cap:0, no-console:0 */
+/* eslint new-cap:0 */
 
 
 var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
 
+function _toConsumableArray(arr) { if (Array.isArray(arr)) { for (var i = 0, arr2 = Array(arr.length); i < arr.length; i++) { arr2[i] = arr[i]; } return arr2; } else { return Array.from(arr); } }
+
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
+var defaultGetLogger = __webpack_require__(/*! ../vendor/loglevel */ "./node_modules/twilio-video/es5/vendor/loglevel.js").getLogger;
 var constants = __webpack_require__(/*! ./constants */ "./node_modules/twilio-video/es5/util/constants.js");
-var DEFAULT_LOG_LEVEL = constants.DEFAULT_LOG_LEVEL;
+var DEFAULT_LOG_LEVEL = constants.DEFAULT_LOG_LEVEL,
+    DEFAULT_LOGGER_NAME = constants.DEFAULT_LOGGER_NAME;
+
 var E = __webpack_require__(/*! ./constants */ "./node_modules/twilio-video/es5/util/constants.js").typeErrors;
 
 var deprecationWarningsByComponentConstructor = void 0;
@@ -61745,7 +64904,7 @@ function getDeprecationWarnings(componentConstructor) {
 }
 
 /**
- * Selectively outputs messages to console.log based on specified minimum module
+ * Selectively outputs messages to console based on specified minimum module
  * specific log levels.
  *
  * NOTE: The values in the logLevels object passed to the constructor is changed
@@ -61758,8 +64917,9 @@ var Log = function () {
    * @param {String} moduleName - Name of the logging module (webrtc/media/signaling)
    * @param {object} component - Component owning this instance of {@link Log}
    * @param {LogLevels} logLevels - Logging levels. See {@link LogLevels}
+   * @param {String} loggerName - Name of the logger instance. Used when calling getLogger from loglevel module
    */
-  function Log(moduleName, component, logLevels) {
+  function Log(moduleName, component, logLevels, loggerName, getLogger) {
     _classCallCheck(this, Log);
 
     if (typeof moduleName !== 'string') {
@@ -61774,6 +64934,8 @@ var Log = function () {
       logLevels = {};
     }
 
+    getLogger = getLogger || defaultGetLogger;
+
     validateLogLevels(logLevels);
 
     /* istanbul ignore next */
@@ -61786,6 +64948,34 @@ var Log = function () {
       },
       _warnings: {
         value: new Set()
+      },
+      _loggerName: {
+        get: function get() {
+          var name = loggerName && typeof loggerName === 'string' ? loggerName : DEFAULT_LOGGER_NAME;
+
+          if (!this._logLevelsEqual) {
+            name = name + '-' + moduleName;
+          }
+          return name;
+        }
+      },
+      _logger: {
+        get: function get() {
+          var logger = getLogger(this._loggerName);
+          var level = this._logLevels[moduleName] || DEFAULT_LOG_LEVEL;
+
+          // There is no 'off' in the logger module. It uses 'silent' instead
+          level = level === 'off' ? 'silent' : level;
+
+          logger.setDefaultLevel(level);
+          return logger;
+        }
+      },
+      _logLevelsEqual: {
+        get: function get() {
+          // True if all levels are the same
+          return new Set(Object.values(this._logLevels)).size === 1;
+        }
       },
       logLevel: {
         get: function get() {
@@ -61816,7 +65006,12 @@ var Log = function () {
      * @returns {Log} this
      */
     value: function createLog(moduleName, component) {
-      return new Log(moduleName, component, this._logLevels);
+      var name = this._loggerName;
+      // Grab the original logger name
+      if (!this._logLevelsEqual) {
+        name = name.substring(0, name.lastIndexOf('-'));
+      }
+      return new Log(moduleName, component, this._logLevels, name);
     }
 
     /**
@@ -61837,34 +65032,33 @@ var Log = function () {
     }
 
     /**
-     * Log a message using the console method appropriate for the specified logLevel
+     * Log a message using the logger method appropriate for the specified logLevel
      * @param {Number} logLevel - Log level of the message being logged
-     * @param {String} message - Message(s) to log
+     * @param {Array} messages - Message(s) to log
      * @returns {Log} This instance of {@link Log}
      * @public
      */
 
   }, {
     key: 'log',
-    value: function log(logLevel, message) {
-      var logSpec = Log._levels[logLevel];
+    value: function log(logLevel, messages) {
+      var name = Log._levels[logLevel];
       // eslint-disable-next-line no-use-before-define
-      if (!logSpec) {
+      if (!name) {
         throw E.INVALID_VALUE('logLevel', LOG_LEVEL_VALUES);
       }
 
-      if (this.logLevel <= logLevel) {
-        var levelName = logSpec.name;
-        var prefix = new Date().toISOString().split('T').concat(['|', levelName, 'in', this.name + ':']);
-        logSpec.logFn.apply(console, prefix.concat(message));
-      }
+      name = name.toLowerCase();
+      var prefix = [new Date().toISOString(), name, this.name];
+
+      (this._logger[name] || function noop() {}).apply(undefined, _toConsumableArray(prefix.concat(messages)));
 
       return this;
     }
 
     /**
-     * Log a debug message using console.log
-     * @param {...String} messages - Message(s) to pass to console.log
+     * Log a debug message
+     * @param {...String} messages - Message(s) to pass to the logger
      * @returns {Log} This instance of {@link Log}
      * @public
      */
@@ -61895,8 +65089,8 @@ var Log = function () {
     }
 
     /**
-     * Log an info message using console.info
-     * @param {...String} messages - Message(s) to pass to console.info
+     * Log an info message
+     * @param {...String} messages - Message(s) to pass to the logger
      * @returns {Log} This instance of {@link Log}
      * @public
      */
@@ -61908,8 +65102,8 @@ var Log = function () {
     }
 
     /**
-     * Log a warn message using console.warn
-     * @param {...String} messages - Message(s) to pass to console.warn
+     * Log a warn message
+     * @param {...String} messages - Message(s) to pass to the logger
      * @returns {Log} This instance of {@link Log}
      * @public
      */
@@ -61938,8 +65132,8 @@ var Log = function () {
     }
 
     /**
-     * Log an error message using console.error
-     * @param {...String} messages - Message(s) to pass to console.error
+     * Log an error message
+     * @param {...String} messages - Message(s) to pass to the logger
      * @returns {Log} This instance of {@link Log}
      * @public
      */
@@ -61951,7 +65145,7 @@ var Log = function () {
     }
 
     /**
-     * Log an error message using console.error and throw an exception
+     * Log an error message and throw an exception
      * @param {TwilioError} error - Error to throw
      * @param {String} customMessage - Custom message for the error
      * @public
@@ -61994,7 +65188,7 @@ Object.defineProperties(Log, {
   ERROR: { value: 3 },
   OFF: { value: 4 },
   _levels: {
-    value: [{ name: 'DEBUG', logFn: console.log }, { name: 'INFO', logFn: console.info }, { name: 'WARN', logFn: console.warn }, { name: 'ERROR', logFn: console.error }, { name: 'OFF', logFn: function noop() {} }]
+    value: ['DEBUG', 'INFO', 'WARN', 'ERROR', 'OFF']
   }
 });
 
@@ -62002,9 +65196,9 @@ var LOG_LEVELS_SET = {};
 var LOG_LEVEL_VALUES = [];
 
 var LOG_LEVEL_NAMES = Log._levels.map(function (level, i) {
-  LOG_LEVELS_SET[level.name] = true;
+  LOG_LEVELS_SET[level] = true;
   LOG_LEVEL_VALUES.push(i);
-  return level.name;
+  return level;
 });
 
 function validateLogLevel(level) {
@@ -62020,6 +65214,131 @@ function validateLogLevels(levels) {
 }
 
 module.exports = Log;
+
+/***/ }),
+
+/***/ "./node_modules/twilio-video/es5/util/networkmonitor.js":
+/*!**************************************************************!*\
+  !*** ./node_modules/twilio-video/es5/util/networkmonitor.js ***!
+  \**************************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+/**
+ * Monitor the network connection status to detect interruptions and handoffs.
+ */
+
+var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
+
+function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
+
+var NetworkMonitor = function () {
+  /**
+   * Construct a {@link NetworkMonitor}.
+   * @param {function} onNetworkChanged
+   * @param {*} [options]
+   */
+  function NetworkMonitor(onNetworkChanged, options) {
+    var _this = this;
+
+    _classCallCheck(this, NetworkMonitor);
+
+    options = Object.assign({
+      navigator: navigator,
+      window: window
+    }, options);
+
+    var nav = options.navigator;
+    var connection = nav.connection || { type: null };
+    var type = connection.type;
+
+    var _ref = connection.type ? {
+      _events: {
+        value: ['change', 'typechange']
+      },
+      _listener: {
+        value: function value() {
+          var networkChanged = type !== _this.type && _this.isOnline;
+          type = _this.type;
+          if (networkChanged) {
+            onNetworkChanged();
+          }
+        }
+      },
+      _target: {
+        value: connection
+      }
+    } : {
+      _events: {
+        value: ['online']
+      },
+      _listener: {
+        value: onNetworkChanged
+      },
+      _target: {
+        value: options.window
+      }
+    },
+        _events = _ref._events,
+        _listener = _ref._listener,
+        _target = _ref._target;
+
+    Object.defineProperties(this, {
+      isOnline: {
+        enumerable: true,
+        get: function get() {
+          return typeof nav.onLine === 'boolean' ? nav.onLine : true;
+        }
+      },
+      type: {
+        enumerable: true,
+        get: function get() {
+          return connection.type || null;
+        }
+      },
+      _listener: _listener,
+      _events: _events,
+      _target: _target
+    });
+  }
+
+  /**
+   * Start the {@link NetworkMonitor}.
+   */
+
+
+  _createClass(NetworkMonitor, [{
+    key: 'start',
+    value: function start() {
+      var _this2 = this;
+
+      this._events.forEach(function (event) {
+        _this2._target.addEventListener(event, _this2._listener);
+      });
+    }
+
+    /**
+     * Stop the {@link NetworkMonitor}.
+     */
+
+  }, {
+    key: 'stop',
+    value: function stop() {
+      var _this3 = this;
+
+      this._events.forEach(function (event) {
+        _this3._target.removeEventListener(event, _this3._listener);
+      });
+    }
+  }]);
+
+  return NetworkMonitor;
+}();
+
+module.exports = NetworkMonitor;
 
 /***/ }),
 
@@ -62193,23 +65512,21 @@ function getPayloadTypesInMediaSection(section) {
 /**
  * Create the reordered Codec Payload Types based on the preferred Codec Names.
  * @param {Map<Codec, Array<PT>>} codecMap - Codec Map
- * @param {Array<Codec>} preferredCodecs - Preferred Codec Names
+ * @param {Array<AudioCodecSettings|VideoCodecSettings>} preferredCodecs - Preferred Codecs
  * @returns {Array<PT>} Reordered Payload Types
  */
 function getReorderedPayloadTypes(codecMap, preferredCodecs) {
-  preferredCodecs = preferredCodecs.map(function (codecName) {
-    return codecName.toLowerCase();
+  preferredCodecs = preferredCodecs.map(function (_ref) {
+    var codec = _ref.codec;
+    return codec.toLowerCase();
   });
-
   var preferredPayloadTypes = flatMap(preferredCodecs, function (codecName) {
     return codecMap.get(codecName) || [];
   });
-
   var remainingCodecs = difference(Array.from(codecMap.keys()), preferredCodecs);
   var remainingPayloadTypes = flatMap(remainingCodecs, function (codecName) {
     return codecMap.get(codecName);
   });
-
   return preferredPayloadTypes.concat(remainingPayloadTypes);
 }
 
@@ -62293,9 +65610,7 @@ function setCodecPreferences(sdp, preferredAudioCodecs, preferredVideoCodecs) {
     }
     var kind = section.match(/^m=(audio|video)/)[1];
     var codecMap = createCodecMapForMediaSection(section);
-    var preferredCodecs = kind === 'audio' ? preferredAudioCodecs : preferredVideoCodecs.map(function (codec) {
-      return codec.codec;
-    });
+    var preferredCodecs = kind === 'audio' ? preferredAudioCodecs : preferredVideoCodecs;
     var payloadTypes = getReorderedPayloadTypes(codecMap, preferredCodecs);
     var newSection = setPayloadTypesInMediaSection(payloadTypes, section);
 
@@ -62396,10 +65711,10 @@ function unifiedPlanFilterCodecsInLocalMediaSection(localSection, remoteMidsToMe
   // Construct a Map of the local codec names to their Payload Types.
   var localCodecsToPts = createCodecMapForMediaSection(localSection);
   // Maintain a list of local non-rtx Payload Types to retain.
-  var localPts = flatMap(Array.from(remotePtToCodecs), function (_ref) {
-    var _ref2 = _slicedToArray(_ref, 2),
-        remotePt = _ref2[0],
-        remoteCodec = _ref2[1];
+  var localPts = flatMap(Array.from(remotePtToCodecs), function (_ref2) {
+    var _ref3 = _slicedToArray(_ref2, 2),
+        remotePt = _ref3[0],
+        remoteCodec = _ref3[1];
 
     return remoteCodec !== 'rtx' ? unifiedPlanGetMatchingLocalPayloadTypes(remoteCodec, remotePt, localCodecsToPts, localSection, remoteSection) : [];
   });
@@ -62492,10 +65807,10 @@ function unifiedPlanAddOrRewriteNewTrackIds(sdp, activeMidsToTrackIds, trackIdsB
   // NOTE(mmalavalli): The m= sections for the new MediaStreamTracks are usually
   // present after the m= sections for the existing MediaStreamTracks, in order
   // of addition.
-  var newMidsToTrackIds = Array.from(trackIdsByKind).reduce(function (midsToTrackIds, _ref3) {
-    var _ref4 = _slicedToArray(_ref3, 2),
-        kind = _ref4[0],
-        trackIds = _ref4[1];
+  var newMidsToTrackIds = Array.from(trackIdsByKind).reduce(function (midsToTrackIds, _ref4) {
+    var _ref5 = _slicedToArray(_ref4, 2),
+        kind = _ref5[0],
+        trackIds = _ref5[1];
 
     var mediaSections = getMediaSections(sdp, kind, 'send(only|recv)');
     var newMids = mediaSections.map(getMidForMediaSection).filter(function (mid) {
@@ -62553,9 +65868,149 @@ function unifiedPlanAddOrRewriteTrackIds(sdp, midsToTrackIds) {
   })).join('\r\n');
 }
 
+/**
+ * removes specified ssrc attributes from given sdp
+ * @param {string} sdp
+ * @param {Array<string>} ssrcAttributesToRemove
+ * @returns {string}
+ */
+function removeSSRCAttributes(sdp, ssrcAttributesToRemove) {
+  return sdp.split('\r\n').filter(function (line) {
+    return !ssrcAttributesToRemove.find(function (srcAttribute) {
+      return new RegExp('a=ssrc:.*' + srcAttribute + ':', 'g').test(line);
+    });
+  }).join('\r\n');
+}
+
+/**
+ * Disable RTX in a given sdp.
+ * @param {string} sdp
+ * @returns {string} sdp without RTX
+ */
+function disableRtx(sdp) {
+  var mediaSections = getMediaSections(sdp);
+  var session = sdp.split('\r\nm=')[0];
+  return [session].concat(mediaSections.map(function (mediaSection) {
+    // Do nothing if the m= section does not represent a video track.
+    if (!/^m=video/.test(mediaSection)) {
+      return mediaSection;
+    }
+
+    // Create a map of codecs to payload types.
+    var codecsToPts = createCodecMapForMediaSection(mediaSection);
+    // Get the RTX payload types.
+    var rtxPts = codecsToPts.get('rtx');
+
+    // Do nothing if there are no RTX payload types.
+    if (!rtxPts) {
+      return mediaSection;
+    }
+
+    // Remove the RTX payload types.
+    var pts = new Set(getPayloadTypesInMediaSection(mediaSection));
+    rtxPts.forEach(function (rtxPt) {
+      return pts.delete(rtxPt);
+    });
+
+    // Get the RTX SSRC.
+    var rtxSSRCMatches = mediaSection.match(/a=ssrc-group:FID [0-9]+ ([0-9]+)/);
+    var rtxSSRC = rtxSSRCMatches && rtxSSRCMatches[1];
+
+    // Remove the following lines associated with the RTX payload types:
+    // 1. "a=fmtp:<rtxPt> apt=<pt>"
+    // 2. "a=rtpmap:<rtxPt> rtx/..."
+    // 3. "a=ssrc:<rtxSSRC> cname:..."
+    // 4. "a=ssrc-group:FID <SSRC> <rtxSSRC>"
+    var filterRegexes = [/^a=fmtp:.+ apt=.+$/, /^a=rtpmap:.+ rtx\/.+$/, /^a=ssrc-group:.+$/].concat(rtxSSRC ? [new RegExp('^a=ssrc:' + rtxSSRC + ' .+$')] : []);
+
+    mediaSection = mediaSection.split('\r\n').filter(function (line) {
+      return filterRegexes.every(function (regex) {
+        return !regex.test(line);
+      });
+    }).join('\r\n');
+
+    // Reconstruct the m= section without the RTX payload types.
+    return setPayloadTypesInMediaSection(Array.from(pts), mediaSection);
+  })).join('\r\n');
+}
+
+/**
+ * Generate an a=fmtp: line from the given payload type and attributes.
+ * @param {PT} pt
+ * @param {*} fmtpAttrs
+ * @returns {string}
+ */
+function generateFmtpLineFromPtAndAttributes(pt, fmtpAttrs) {
+  var serializedFmtpAttrs = Object.entries(fmtpAttrs).map(function (_ref6) {
+    var _ref7 = _slicedToArray(_ref6, 2),
+        name = _ref7[0],
+        value = _ref7[1];
+
+    return name + '=' + value;
+  }).join(';');
+  return 'a=fmtp:' + pt + ' ' + serializedFmtpAttrs;
+}
+
+/**
+ * Enable DTX for opus in the m= sections for the given MIDs.`
+ * @param {string} sdp
+ * @param {Array<string>} [mids] - If not specified, enables opus DTX for all
+ *   audio m= lines.
+ * @returns {string}
+ */
+function enableDtxForOpus(sdp, mids) {
+  var mediaSections = getMediaSections(sdp);
+  var session = sdp.split('\r\nm=')[0];
+
+  mids = mids || mediaSections.filter(function (section) {
+    return (/^m=audio/.test(section)
+    );
+  }).map(getMidForMediaSection);
+
+  return [session].concat(mediaSections.map(function (section) {
+    // Do nothing if the m= section is not audio.
+    if (!/^m=audio/.test(section)) {
+      return section;
+    }
+
+    // Build a map codecs to payload types.
+    var codecsToPts = createCodecMapForMediaSection(section);
+
+    // Do nothing if a payload type for opus does not exist.
+    var opusPt = codecsToPts.get('opus');
+    if (!opusPt) {
+      return section;
+    }
+
+    // If no fmtp attributes are found for opus, do nothing.
+    var opusFmtpAttrs = getFmtpAttributesForPt(opusPt, section);
+    if (!opusFmtpAttrs) {
+      return section;
+    }
+
+    // Add usedtx=1 to the a=fmtp: line for opus.
+    var origOpusFmtpLine = generateFmtpLineFromPtAndAttributes(opusPt, opusFmtpAttrs);
+    var origOpusFmtpRegex = new RegExp(origOpusFmtpLine);
+
+    // If the m= section's MID is in the list of MIDs, then enable dtx. Otherwise disable it.
+    var mid = getMidForMediaSection(section);
+    if (mids.includes(mid)) {
+      opusFmtpAttrs.usedtx = 1;
+    } else {
+      delete opusFmtpAttrs.usedtx;
+    }
+
+    var opusFmtpLineWithDtx = generateFmtpLineFromPtAndAttributes(opusPt, opusFmtpAttrs);
+    return section.replace(origOpusFmtpRegex, opusFmtpLineWithDtx);
+  })).join('\r\n');
+}
+
 exports.createCodecMapForMediaSection = createCodecMapForMediaSection;
 exports.createPtToCodecName = createPtToCodecName;
+exports.disableRtx = disableRtx;
+exports.enableDtxForOpus = enableDtxForOpus;
 exports.getMediaSections = getMediaSections;
+exports.removeSSRCAttributes = removeSSRCAttributes;
 exports.revertSimulcastForNonVP8MediaSections = revertSimulcastForNonVP8MediaSections;
 exports.setBitrateParameters = setBitrateParameters;
 exports.setCodecPreferences = setCodecPreferences;
@@ -63427,48 +66882,103 @@ module.exports = OrderedTrackMatcher;
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
-/* globals RTCPeerConnection, webkitRTCPeerConnection, mozRTCPeerConnection, navigator */
+/* globals chrome, navigator */
 
+
+function _toArray(arr) { return Array.isArray(arr) ? arr : Array.from(arr); }
 
 var _require = __webpack_require__(/*! @twilio/webrtc/lib/util */ "./node_modules/@twilio/webrtc/lib/util/index.js"),
-    guessBrowser = _require.guessBrowser;
+    guessBrowser = _require.guessBrowser,
+    isWebRTCSupported = _require.support;
+
+var SUPPORTED_CHROME_BASED_BROWSERS = ['edg', 'edge', 'electron', 'headlesschrome'];
 
 /**
- * Check whether PeerConnection API is supported.
- * @returns {boolean}
+ * Get the top level parenthesized substrings within a given string. Unmatched
+ * parentheses are ignored.
+ * Ex: "abc) (def) gh(ij) (kl (mn)o) (pqr" => ["(def)", "(ij)", "(kl (mn)o)"]
+ * @param {string} string
+ * @returns {string[]}
  */
-
-
-function isRTCPeerConnectionSupported() {
-  return typeof RTCPeerConnection !== 'undefined' || typeof webkitRTCPeerConnection !== 'undefined' || typeof mozRTCPeerConnection !== 'undefined';
-}
-
-/**
- * Check whether GetUserMedia API is supported.
- * @returns {boolean}
- */
-function isGetUserMediaSupported() {
-  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) || !!navigator.getUserMedia || !!navigator.webkitGetUserMedia || !!navigator.mozGetUserMedia;
-}
-
-/**
- * @returns {boolean} - true if the browser is explicitly unsupported.
- *  Note: this function returning false does not mean that browser is supported.
- */
-function isExplicitlyUnsupportedBrowser() {
-  if (typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string') {
-    return (/Edg(e)?/.test(navigator.userAgent)
-    );
+function getParenthesizedSubstrings(string) {
+  var openParenthesisPositions = [];
+  var substrings = [];
+  for (var i = 0; i < string.length; i++) {
+    if (string[i] === '(') {
+      openParenthesisPositions.push(i);
+    } else if (string[i] === ')' && openParenthesisPositions.length > 0) {
+      var openParenthesisPosition = openParenthesisPositions.pop();
+      if (openParenthesisPositions.length === 0) {
+        substrings.push(string.substring(openParenthesisPosition, i + 1));
+      }
+    }
   }
-  return false;
+  return substrings;
 }
 
 /**
- * Check if the current environment is supported by the SDK.
+ * Check whether the current browser is non-Chromium Edge.
+ * @param {string} browser
+ * @returns {boolean}
+ */
+function isNonChromiumEdge(browser) {
+  return browser === 'chrome' && /Edge/.test(navigator.userAgent) && (typeof chrome === 'undefined' || typeof chrome.runtime === 'undefined');
+}
+
+/**
+ * Get the name of the rebranded Chromium browser, if any. Re-branded Chrome's user
+ * agent has the following format:
+ * <source>/<version> (<os>) <engine>/<version> (<engine_name>) Chrome/<version> [Mobile] Safari/<version>
+ * @param browser
+ * @returns {?string} Name of the rebranded Chrome browser, or null if the browser
+ *   is either not Chrome or vanilla Chrome.
+ */
+function rebrandedChromeBrowser(browser) {
+  // If the browser is not Chrome based, then it is not a rebranded Chrome browser.
+  if (browser !== 'chrome') {
+    return null;
+  }
+
+  // Latest desktop Brave browser has a "brave" property in navigator.
+  if ('brave' in navigator) {
+    return 'brave';
+  }
+
+  // Remove the "(.+)" entries from the user agent thereby retaining only the
+  // <name>[/<version>] entries.
+  var parenthesizedSubstrings = getParenthesizedSubstrings(navigator.userAgent);
+  var nameAndVersions = parenthesizedSubstrings.reduce(function (userAgent, substring) {
+    return userAgent.replace(substring, '');
+  }, navigator.userAgent);
+
+  // Extract the potential browser <name>s by ignoring the first two names, which
+  // point to <source> and <engine>.
+  var matches = nameAndVersions.match(/[^\s]+/g) || [];
+
+  var _matches$map = matches.map(function (nameAndVersion) {
+    return nameAndVersion.split('/')[0].toLowerCase();
+  }),
+      _matches$map2 = _toArray(_matches$map),
+      browserNames = _matches$map2.slice(2);
+
+  // Extract the <name> that is not expected to be present in the vanilla Chrome
+  // browser, which indicates the rebranded name (ex: "edg[e]", "electron"). If null,
+  // then this is a vanilla Chrome browser.
+
+
+  return browserNames.find(function (name) {
+    return !['chrome', 'mobile', 'safari'].includes(name);
+  }) || null;
+}
+
+/**
+ * Check if the current browser is officially supported by twilio-video.js.
  * @returns {boolean}
  */
 function isSupported() {
-  return !isExplicitlyUnsupportedBrowser() && !!guessBrowser() && isGetUserMediaSupported() && isRTCPeerConnectionSupported();
+  var browser = guessBrowser();
+  var rebrandedChrome = rebrandedChromeBrowser(browser);
+  return !!browser && isWebRTCSupported() && (!rebrandedChrome || SUPPORTED_CHROME_BASED_BROWSERS.includes(rebrandedChrome)) && !isNonChromiumEdge(browser);
 }
 
 module.exports = isSupported;
@@ -63498,13 +67008,17 @@ var Timeout = function () {
    * Construct a {@link Timeout}.
    * @param {function} fn - Function to call
    * @param {number} delay - Delay in milliseconds
+   * @param {boolean} [autoStart=true] - If true, then start the {@link Timeout}.
    */
   function Timeout(fn, delay) {
+    var autoStart = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : true;
+
     _classCallCheck(this, Timeout);
 
     Object.defineProperties(this, {
       _delay: {
-        value: delay
+        value: delay,
+        writable: true
       },
       _fn: {
         value: fn
@@ -63515,34 +67029,56 @@ var Timeout = function () {
       }
     });
 
-    this._start();
+    if (autoStart) {
+      this.start();
+    }
   }
 
   /**
-   * Start the {@link Timeout}.
-   * @private
+   * The {@link Timeout} delay in milliseconds.
+   * @property {number}
    */
 
 
   _createClass(Timeout, [{
-    key: '_start',
-    value: function _start() {
-      this._timeout = setTimeout(this._fn, this._delay);
+    key: 'setDelay',
+
+
+    /**
+     * Update the {@link Timeout} delay.
+     * @param {number} delay
+     * @returns {void}
+     */
+    value: function setDelay(delay) {
+      this._delay = delay;
     }
 
     /**
-     * Whether the {@link Timeout} is set.
-     * @property {boolean}
+     * Start the {@link Timeout}, if not already started.
+     * @returns {void}
      */
 
   }, {
-    key: 'clear',
+    key: 'start',
+    value: function start() {
+      var _this = this;
 
+      if (!this.isSet) {
+        this._timeout = setTimeout(function () {
+          var fn = _this._fn;
+          _this.clear();
+          fn();
+        }, this._delay);
+      }
+    }
 
     /**
      * Clear the {@link Timeout}.
      * @returns {void}
      */
+
+  }, {
+    key: 'clear',
     value: function clear() {
       clearTimeout(this._timeout);
       this._timeout = null;
@@ -63556,9 +67092,20 @@ var Timeout = function () {
   }, {
     key: 'reset',
     value: function reset() {
-      clearTimeout(this._timeout);
-      this._start();
+      this.clear();
+      this.start();
     }
+  }, {
+    key: 'delay',
+    get: function get() {
+      return this._delay;
+    }
+
+    /**
+     * Whether the {@link Timeout} is set.
+     * @property {boolean}
+     */
+
   }, {
     key: 'isSet',
     get: function get() {
@@ -63573,177 +67120,6 @@ module.exports = Timeout;
 
 /***/ }),
 
-/***/ "./node_modules/twilio-video/es5/util/timeoutpromise.js":
-/*!**************************************************************!*\
-  !*** ./node_modules/twilio-video/es5/util/timeoutpromise.js ***!
-  \**************************************************************/
-/*! no static exports found */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
-
-function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
-
-function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
-
-function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
-
-var EventEmitter = __webpack_require__(/*! events */ "./node_modules/events/events.js").EventEmitter;
-var util = __webpack_require__(/*! ./ */ "./node_modules/twilio-video/es5/util/index.js");
-
-/**
- * A Promise that can time out.
- * @extends EventEmitter
- * @implements Promise
- * @property {?number} timeout - the timeout, in milliseconds
- * @property {boolean} isTimedOut - whether or not the
- *   {@link TimeoutPromise} timed out
- * @emits TimeoutPromise#timedOut
- */
-
-var TimeoutPromise = function (_EventEmitter) {
-  _inherits(TimeoutPromise, _EventEmitter);
-
-  /**
-   * Construct a new {@link TimeoutPromise}.
-   * @param {Promise} original - a Promise
-   * @param {?number} [timeout] - the timeout, in milliseconds; providing this in
-   *   the constructor invokes {@link TimeoutPromise#start} (otherwise, you must
-   *   call {@link TimeoutPromise#start} yourself)
-   */
-  function TimeoutPromise(original, initialTimeout) {
-    _classCallCheck(this, TimeoutPromise);
-
-    var _this = _possibleConstructorReturn(this, (TimeoutPromise.__proto__ || Object.getPrototypeOf(TimeoutPromise)).call(this));
-
-    var deferred = util.defer();
-    var isTimedOut = false;
-    var timedOut = new Error('Timed out');
-    var timeout = null;
-    var timer = null;
-
-    /* istanbul ignore next */
-    Object.defineProperties(_this, {
-      _deferred: {
-        value: deferred
-      },
-      _isTimedOut: {
-        get: function get() {
-          return isTimedOut;
-        },
-        set: function set(_isTimedOut) {
-          isTimedOut = _isTimedOut;
-        }
-      },
-      _timedOut: {
-        value: timedOut
-      },
-      _timeout: {
-        get: function get() {
-          return timeout;
-        },
-        set: function set(_timeout) {
-          timeout = _timeout;
-        }
-      },
-      _timer: {
-        get: function get() {
-          return timer;
-        },
-        set: function set(_timer) {
-          timer = _timer;
-        }
-      },
-      _promise: {
-        value: deferred.promise
-      },
-      isTimedOut: {
-        enumerable: true,
-        get: function get() {
-          return isTimedOut;
-        }
-      },
-      timeout: {
-        enumerable: true,
-        get: function get() {
-          return timeout;
-        }
-      }
-    });
-
-    original.then(function (result) {
-      clearTimeout(_this._timer);
-      deferred.resolve(result);
-    }, function (reason) {
-      clearTimeout(_this._timer);
-      deferred.reject(reason);
-    });
-
-    if (initialTimeout) {
-      _this.start(initialTimeout);
-    }
-    return _this;
-  }
-
-  _createClass(TimeoutPromise, [{
-    key: 'catch',
-    value: function _catch() {
-      var _promise;
-
-      return (_promise = this._promise).catch.apply(_promise, arguments);
-    }
-
-    /**
-     * Start the timer that will time out the {@link TimeoutPromise} if the
-     * original Promise has neither resolved nor rejected. Subsequent calls have no
-     * effect once the {@link TimeoutPromise} is started.
-     * @param {number} timeout - the timeout, in milliseconds
-     * @returns {this}
-     */
-
-  }, {
-    key: 'start',
-    value: function start(timeout) {
-      var _this2 = this;
-
-      if (this._timer) {
-        return this;
-      }
-      this._timeout = timeout;
-      this._timer = setTimeout(function () {
-        if (_this2._timer) {
-          _this2._isTimedOut = true;
-          _this2.emit('timedOut', _this2);
-          _this2._deferred.reject(_this2._timedOut);
-        }
-      }, this.timeout);
-      return this;
-    }
-  }, {
-    key: 'then',
-    value: function then() {
-      var _promise2;
-
-      return (_promise2 = this._promise).then.apply(_promise2, arguments);
-    }
-  }]);
-
-  return TimeoutPromise;
-}(EventEmitter);
-
-/**
- * The {@link TimeoutPromise} timed out.
- * @param {TimeoutPromise} promise - The {@link TimeoutPromise}
- * @event TimeoutPromise#timedOut
- */
-
-module.exports = TimeoutPromise;
-
-/***/ }),
-
 /***/ "./node_modules/twilio-video/es5/util/twilio-video-errors.js":
 /*!*******************************************************************!*\
   !*** ./node_modules/twilio-video/es5/util/twilio-video-errors.js ***!
@@ -63752,10 +67128,10 @@ module.exports = TimeoutPromise;
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
-
-
 // NOTE: Do not edit this file. This code is auto-generated. Contact the
 // Twilio SDK Team for more information.
+
+
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
@@ -63781,7 +67157,7 @@ exports.createTwilioError = function createTwilioError(code, message) {
 
 /**
  * @class AccessTokenInvalidError
- * @classdesc Raised whenever the AccessToken used for connecting to Room is invalid.
+ * @classdesc Raised whenever the AccessToken used for connecting to a Room is invalid.
  * @extends TwilioError
  * @property {number} code - 20101
  * @property {string} message - 'Invalid Access Token'
@@ -63804,7 +67180,7 @@ Object.defineProperty(TwilioErrorByCode, 20101, { value: AccessTokenInvalidError
 
 /**
  * @class AccessTokenHeaderInvalidError
- * @classdesc Raised whenever the AccessToken used for connecting to Room has an invalid header.
+ * @classdesc Raised whenever the AccessToken used for connecting to a Room has an invalid header.
  * @extends TwilioError
  * @property {number} code - 20102
  * @property {string} message - 'Invalid Access Token header'
@@ -63827,7 +67203,7 @@ Object.defineProperty(TwilioErrorByCode, 20102, { value: AccessTokenHeaderInvali
 
 /**
  * @class AccessTokenIssuerInvalidError
- * @classdesc Raised whenever the AccessToken used for connecting to Room contains an invalid issuer or subject.
+ * @classdesc Raised whenever the AccessToken used for connecting to a Room contains an invalid issuer or subject.
  * @extends TwilioError
  * @property {number} code - 20103
  * @property {string} message - 'Invalid Access Token issuer/subject'
@@ -63850,7 +67226,7 @@ Object.defineProperty(TwilioErrorByCode, 20103, { value: AccessTokenIssuerInvali
 
 /**
  * @class AccessTokenExpiredError
- * @classdesc Raised whenever the AccessToken used for connecting to Room has expired.
+ * @classdesc Raised whenever the AccessToken used for connecting, or reconnecting to a Room has expired.
  * @extends TwilioError
  * @property {number} code - 20104
  * @property {string} message - 'Access Token expired or expiration date invalid'
@@ -63873,7 +67249,7 @@ Object.defineProperty(TwilioErrorByCode, 20104, { value: AccessTokenExpiredError
 
 /**
  * @class AccessTokenNotYetValidError
- * @classdesc Raised whenever the AccessToken used for connecting to Room is not yet valid.
+ * @classdesc Raised whenever the AccessToken used for connecting to a Room is not yet valid.
  * @extends TwilioError
  * @property {number} code - 20105
  * @property {string} message - 'Access Token not yet valid'
@@ -63896,7 +67272,7 @@ Object.defineProperty(TwilioErrorByCode, 20105, { value: AccessTokenNotYetValidE
 
 /**
  * @class AccessTokenGrantsInvalidError
- * @classdesc Raised whenever the AccessToken used for connecting to Room has invalid grants.
+ * @classdesc Raised whenever the AccessToken used for connecting to a Room has invalid grants.
  * @extends TwilioError
  * @property {number} code - 20106
  * @property {string} message - 'Invalid Access Token grants'
@@ -63919,7 +67295,7 @@ Object.defineProperty(TwilioErrorByCode, 20106, { value: AccessTokenGrantsInvali
 
 /**
  * @class AccessTokenSignatureInvalidError
- * @classdesc Raised whenever the AccessToken used for connecting to Room has an invalid signature.
+ * @classdesc Raised whenever the AccessToken used for connecting to a Room has an invalid signature.
  * @extends TwilioError
  * @property {number} code - 20107
  * @property {string} message - 'Invalid Access Token signature'
@@ -63988,7 +67364,7 @@ Object.defineProperty(TwilioErrorByCode, 53001, { value: SignalingConnectionDisc
 
 /**
  * @class SignalingConnectionTimeoutError
- * @classdesc Raised whenever the signaling connection times out.
+ * @classdesc Raised when connection liveliness checks fail, or when the signaling session expires.
  * @extends TwilioError
  * @property {number} code - 53002
  * @property {string} message - 'Signaling connection timed out'
@@ -64056,6 +67432,29 @@ exports.SignalingOutgoingMessageInvalidError = SignalingOutgoingMessageInvalidEr
 Object.defineProperty(TwilioErrorByCode, 53004, { value: SignalingOutgoingMessageInvalidError });
 
 /**
+ * @class SignalingServerBusyError
+ * @classdesc Raised when the server is too busy to accept new clients.
+ * @extends TwilioError
+ * @property {number} code - 53006
+ * @property {string} message - 'Video server is busy'
+ */
+
+var SignalingServerBusyError = function (_TwilioError13) {
+  _inherits(SignalingServerBusyError, _TwilioError13);
+
+  function SignalingServerBusyError() {
+    _classCallCheck(this, SignalingServerBusyError);
+
+    return _possibleConstructorReturn(this, (SignalingServerBusyError.__proto__ || Object.getPrototypeOf(SignalingServerBusyError)).call(this, 53006, 'Video server is busy'));
+  }
+
+  return SignalingServerBusyError;
+}(TwilioError);
+
+exports.SignalingServerBusyError = SignalingServerBusyError;
+Object.defineProperty(TwilioErrorByCode, 53006, { value: SignalingServerBusyError });
+
+/**
  * @class RoomNameInvalidError
  * @classdesc Raised whenever a Room name is invalid, and the scenario is not covered by a more specific error code.
  * @extends TwilioError
@@ -64063,8 +67462,8 @@ Object.defineProperty(TwilioErrorByCode, 53004, { value: SignalingOutgoingMessag
  * @property {string} message - 'Room name is invalid'
  */
 
-var RoomNameInvalidError = function (_TwilioError13) {
-  _inherits(RoomNameInvalidError, _TwilioError13);
+var RoomNameInvalidError = function (_TwilioError14) {
+  _inherits(RoomNameInvalidError, _TwilioError14);
 
   function RoomNameInvalidError() {
     _classCallCheck(this, RoomNameInvalidError);
@@ -64086,8 +67485,8 @@ Object.defineProperty(TwilioErrorByCode, 53100, { value: RoomNameInvalidError })
  * @property {string} message - 'Room name is too long'
  */
 
-var RoomNameTooLongError = function (_TwilioError14) {
-  _inherits(RoomNameTooLongError, _TwilioError14);
+var RoomNameTooLongError = function (_TwilioError15) {
+  _inherits(RoomNameTooLongError, _TwilioError15);
 
   function RoomNameTooLongError() {
     _classCallCheck(this, RoomNameTooLongError);
@@ -64109,8 +67508,8 @@ Object.defineProperty(TwilioErrorByCode, 53101, { value: RoomNameTooLongError })
  * @property {string} message - 'Room name contains invalid characters'
  */
 
-var RoomNameCharsInvalidError = function (_TwilioError15) {
-  _inherits(RoomNameCharsInvalidError, _TwilioError15);
+var RoomNameCharsInvalidError = function (_TwilioError16) {
+  _inherits(RoomNameCharsInvalidError, _TwilioError16);
 
   function RoomNameCharsInvalidError() {
     _classCallCheck(this, RoomNameCharsInvalidError);
@@ -64132,8 +67531,8 @@ Object.defineProperty(TwilioErrorByCode, 53102, { value: RoomNameCharsInvalidErr
  * @property {string} message - 'Unable to create Room'
  */
 
-var RoomCreateFailedError = function (_TwilioError16) {
-  _inherits(RoomCreateFailedError, _TwilioError16);
+var RoomCreateFailedError = function (_TwilioError17) {
+  _inherits(RoomCreateFailedError, _TwilioError17);
 
   function RoomCreateFailedError() {
     _classCallCheck(this, RoomCreateFailedError);
@@ -64155,8 +67554,8 @@ Object.defineProperty(TwilioErrorByCode, 53103, { value: RoomCreateFailedError }
  * @property {string} message - 'Unable to connect to Room'
  */
 
-var RoomConnectFailedError = function (_TwilioError17) {
-  _inherits(RoomConnectFailedError, _TwilioError17);
+var RoomConnectFailedError = function (_TwilioError18) {
+  _inherits(RoomConnectFailedError, _TwilioError18);
 
   function RoomConnectFailedError() {
     _classCallCheck(this, RoomConnectFailedError);
@@ -64178,8 +67577,8 @@ Object.defineProperty(TwilioErrorByCode, 53104, { value: RoomConnectFailedError 
  * @property {string} message - 'Room contains too many Participants'
  */
 
-var RoomMaxParticipantsExceededError = function (_TwilioError18) {
-  _inherits(RoomMaxParticipantsExceededError, _TwilioError18);
+var RoomMaxParticipantsExceededError = function (_TwilioError19) {
+  _inherits(RoomMaxParticipantsExceededError, _TwilioError19);
 
   function RoomMaxParticipantsExceededError() {
     _classCallCheck(this, RoomMaxParticipantsExceededError);
@@ -64201,8 +67600,8 @@ Object.defineProperty(TwilioErrorByCode, 53105, { value: RoomMaxParticipantsExce
  * @property {string} message - 'Room not found'
  */
 
-var RoomNotFoundError = function (_TwilioError19) {
-  _inherits(RoomNotFoundError, _TwilioError19);
+var RoomNotFoundError = function (_TwilioError20) {
+  _inherits(RoomNotFoundError, _TwilioError20);
 
   function RoomNotFoundError() {
     _classCallCheck(this, RoomNotFoundError);
@@ -64224,8 +67623,8 @@ Object.defineProperty(TwilioErrorByCode, 53106, { value: RoomNotFoundError });
  * @property {string} message - 'MaxParticipants is out of range'
  */
 
-var RoomMaxParticipantsOutOfRangeError = function (_TwilioError20) {
-  _inherits(RoomMaxParticipantsOutOfRangeError, _TwilioError20);
+var RoomMaxParticipantsOutOfRangeError = function (_TwilioError21) {
+  _inherits(RoomMaxParticipantsOutOfRangeError, _TwilioError21);
 
   function RoomMaxParticipantsOutOfRangeError() {
     _classCallCheck(this, RoomMaxParticipantsOutOfRangeError);
@@ -64247,8 +67646,8 @@ Object.defineProperty(TwilioErrorByCode, 53107, { value: RoomMaxParticipantsOutO
  * @property {string} message - 'RoomType is not valid'
  */
 
-var RoomTypeInvalidError = function (_TwilioError21) {
-  _inherits(RoomTypeInvalidError, _TwilioError21);
+var RoomTypeInvalidError = function (_TwilioError22) {
+  _inherits(RoomTypeInvalidError, _TwilioError22);
 
   function RoomTypeInvalidError() {
     _classCallCheck(this, RoomTypeInvalidError);
@@ -64270,8 +67669,8 @@ Object.defineProperty(TwilioErrorByCode, 53108, { value: RoomTypeInvalidError })
  * @property {string} message - 'Timeout is out of range'
  */
 
-var RoomTimeoutOutOfRangeError = function (_TwilioError22) {
-  _inherits(RoomTimeoutOutOfRangeError, _TwilioError22);
+var RoomTimeoutOutOfRangeError = function (_TwilioError23) {
+  _inherits(RoomTimeoutOutOfRangeError, _TwilioError23);
 
   function RoomTimeoutOutOfRangeError() {
     _classCallCheck(this, RoomTimeoutOutOfRangeError);
@@ -64293,8 +67692,8 @@ Object.defineProperty(TwilioErrorByCode, 53109, { value: RoomTimeoutOutOfRangeEr
  * @property {string} message - 'StatusCallbackMethod is invalid'
  */
 
-var RoomStatusCallbackMethodInvalidError = function (_TwilioError23) {
-  _inherits(RoomStatusCallbackMethodInvalidError, _TwilioError23);
+var RoomStatusCallbackMethodInvalidError = function (_TwilioError24) {
+  _inherits(RoomStatusCallbackMethodInvalidError, _TwilioError24);
 
   function RoomStatusCallbackMethodInvalidError() {
     _classCallCheck(this, RoomStatusCallbackMethodInvalidError);
@@ -64316,8 +67715,8 @@ Object.defineProperty(TwilioErrorByCode, 53110, { value: RoomStatusCallbackMetho
  * @property {string} message - 'StatusCallback is invalid'
  */
 
-var RoomStatusCallbackInvalidError = function (_TwilioError24) {
-  _inherits(RoomStatusCallbackInvalidError, _TwilioError24);
+var RoomStatusCallbackInvalidError = function (_TwilioError25) {
+  _inherits(RoomStatusCallbackInvalidError, _TwilioError25);
 
   function RoomStatusCallbackInvalidError() {
     _classCallCheck(this, RoomStatusCallbackInvalidError);
@@ -64339,8 +67738,8 @@ Object.defineProperty(TwilioErrorByCode, 53111, { value: RoomStatusCallbackInval
  * @property {string} message - 'Status is invalid'
  */
 
-var RoomStatusInvalidError = function (_TwilioError25) {
-  _inherits(RoomStatusInvalidError, _TwilioError25);
+var RoomStatusInvalidError = function (_TwilioError26) {
+  _inherits(RoomStatusInvalidError, _TwilioError26);
 
   function RoomStatusInvalidError() {
     _classCallCheck(this, RoomStatusInvalidError);
@@ -64362,8 +67761,8 @@ Object.defineProperty(TwilioErrorByCode, 53112, { value: RoomStatusInvalidError 
  * @property {string} message - 'Room exists'
  */
 
-var RoomRoomExistsError = function (_TwilioError26) {
-  _inherits(RoomRoomExistsError, _TwilioError26);
+var RoomRoomExistsError = function (_TwilioError27) {
+  _inherits(RoomRoomExistsError, _TwilioError27);
 
   function RoomRoomExistsError() {
     _classCallCheck(this, RoomRoomExistsError);
@@ -64385,8 +67784,8 @@ Object.defineProperty(TwilioErrorByCode, 53113, { value: RoomRoomExistsError });
  * @property {string} message - 'Room creation parameter(s) incompatible with the Room type'
  */
 
-var RoomInvalidParametersError = function (_TwilioError27) {
-  _inherits(RoomInvalidParametersError, _TwilioError27);
+var RoomInvalidParametersError = function (_TwilioError28) {
+  _inherits(RoomInvalidParametersError, _TwilioError28);
 
   function RoomInvalidParametersError() {
     _classCallCheck(this, RoomInvalidParametersError);
@@ -64408,8 +67807,8 @@ Object.defineProperty(TwilioErrorByCode, 53114, { value: RoomInvalidParametersEr
  * @property {string} message - 'MediaRegion is invalid'
  */
 
-var RoomMediaRegionInvalidError = function (_TwilioError28) {
-  _inherits(RoomMediaRegionInvalidError, _TwilioError28);
+var RoomMediaRegionInvalidError = function (_TwilioError29) {
+  _inherits(RoomMediaRegionInvalidError, _TwilioError29);
 
   function RoomMediaRegionInvalidError() {
     _classCallCheck(this, RoomMediaRegionInvalidError);
@@ -64431,8 +67830,8 @@ Object.defineProperty(TwilioErrorByCode, 53115, { value: RoomMediaRegionInvalidE
  * @property {string} message - 'There are no media servers available in the MediaRegion'
  */
 
-var RoomMediaRegionUnavailableError = function (_TwilioError29) {
-  _inherits(RoomMediaRegionUnavailableError, _TwilioError29);
+var RoomMediaRegionUnavailableError = function (_TwilioError30) {
+  _inherits(RoomMediaRegionUnavailableError, _TwilioError30);
 
   function RoomMediaRegionUnavailableError() {
     _classCallCheck(this, RoomMediaRegionUnavailableError);
@@ -64454,8 +67853,8 @@ Object.defineProperty(TwilioErrorByCode, 53116, { value: RoomMediaRegionUnavaila
  * @property {string} message - 'The subscription operation requested is not supported for the Room type'
  */
 
-var RoomSubscriptionOperationNotSupportedError = function (_TwilioError30) {
-  _inherits(RoomSubscriptionOperationNotSupportedError, _TwilioError30);
+var RoomSubscriptionOperationNotSupportedError = function (_TwilioError31) {
+  _inherits(RoomSubscriptionOperationNotSupportedError, _TwilioError31);
 
   function RoomSubscriptionOperationNotSupportedError() {
     _classCallCheck(this, RoomSubscriptionOperationNotSupportedError);
@@ -64477,8 +67876,8 @@ Object.defineProperty(TwilioErrorByCode, 53117, { value: RoomSubscriptionOperati
  * @property {string} message - 'Room completed'
  */
 
-var RoomCompletedError = function (_TwilioError31) {
-  _inherits(RoomCompletedError, _TwilioError31);
+var RoomCompletedError = function (_TwilioError32) {
+  _inherits(RoomCompletedError, _TwilioError32);
 
   function RoomCompletedError() {
     _classCallCheck(this, RoomCompletedError);
@@ -64500,8 +67899,8 @@ Object.defineProperty(TwilioErrorByCode, 53118, { value: RoomCompletedError });
  * @property {string} message - 'Participant identity is invalid'
  */
 
-var ParticipantIdentityInvalidError = function (_TwilioError32) {
-  _inherits(ParticipantIdentityInvalidError, _TwilioError32);
+var ParticipantIdentityInvalidError = function (_TwilioError33) {
+  _inherits(ParticipantIdentityInvalidError, _TwilioError33);
 
   function ParticipantIdentityInvalidError() {
     _classCallCheck(this, ParticipantIdentityInvalidError);
@@ -64523,8 +67922,8 @@ Object.defineProperty(TwilioErrorByCode, 53200, { value: ParticipantIdentityInva
  * @property {string} message - 'Participant identity is too long'
  */
 
-var ParticipantIdentityTooLongError = function (_TwilioError33) {
-  _inherits(ParticipantIdentityTooLongError, _TwilioError33);
+var ParticipantIdentityTooLongError = function (_TwilioError34) {
+  _inherits(ParticipantIdentityTooLongError, _TwilioError34);
 
   function ParticipantIdentityTooLongError() {
     _classCallCheck(this, ParticipantIdentityTooLongError);
@@ -64546,8 +67945,8 @@ Object.defineProperty(TwilioErrorByCode, 53201, { value: ParticipantIdentityTooL
  * @property {string} message - 'Participant identity contains invalid characters'
  */
 
-var ParticipantIdentityCharsInvalidError = function (_TwilioError34) {
-  _inherits(ParticipantIdentityCharsInvalidError, _TwilioError34);
+var ParticipantIdentityCharsInvalidError = function (_TwilioError35) {
+  _inherits(ParticipantIdentityCharsInvalidError, _TwilioError35);
 
   function ParticipantIdentityCharsInvalidError() {
     _classCallCheck(this, ParticipantIdentityCharsInvalidError);
@@ -64563,19 +67962,19 @@ Object.defineProperty(TwilioErrorByCode, 53202, { value: ParticipantIdentityChar
 
 /**
  * @class ParticipantMaxTracksExceededError
- * @classdesc Raised whenever a Participant has too many Tracks.
+ * @classdesc Raised when the Room limit for published tracks has been reached and a Participant tries to publish a track to the Room.
  * @extends TwilioError
  * @property {number} code - 53203
- * @property {string} message - 'Participant has too many Tracks'
+ * @property {string} message - 'The maximum number of published tracks allowed in the Room at the same time has been reached'
  */
 
-var ParticipantMaxTracksExceededError = function (_TwilioError35) {
-  _inherits(ParticipantMaxTracksExceededError, _TwilioError35);
+var ParticipantMaxTracksExceededError = function (_TwilioError36) {
+  _inherits(ParticipantMaxTracksExceededError, _TwilioError36);
 
   function ParticipantMaxTracksExceededError() {
     _classCallCheck(this, ParticipantMaxTracksExceededError);
 
-    return _possibleConstructorReturn(this, (ParticipantMaxTracksExceededError.__proto__ || Object.getPrototypeOf(ParticipantMaxTracksExceededError)).call(this, 53203, 'Participant has too many Tracks'));
+    return _possibleConstructorReturn(this, (ParticipantMaxTracksExceededError.__proto__ || Object.getPrototypeOf(ParticipantMaxTracksExceededError)).call(this, 53203, 'The maximum number of published tracks allowed in the Room at the same time has been reached'));
   }
 
   return ParticipantMaxTracksExceededError;
@@ -64586,14 +67985,14 @@ Object.defineProperty(TwilioErrorByCode, 53203, { value: ParticipantMaxTracksExc
 
 /**
  * @class ParticipantNotFoundError
- * @classdesc Raised whenever attempting operation on a non-existent Participant.
+ * @classdesc Raised whenever attempting an operation on a non-existent Participant.
  * @extends TwilioError
  * @property {number} code - 53204
  * @property {string} message - 'Participant not found'
  */
 
-var ParticipantNotFoundError = function (_TwilioError36) {
-  _inherits(ParticipantNotFoundError, _TwilioError36);
+var ParticipantNotFoundError = function (_TwilioError37) {
+  _inherits(ParticipantNotFoundError, _TwilioError37);
 
   function ParticipantNotFoundError() {
     _classCallCheck(this, ParticipantNotFoundError);
@@ -64615,8 +68014,8 @@ Object.defineProperty(TwilioErrorByCode, 53204, { value: ParticipantNotFoundErro
  * @property {string} message - 'Participant disconnected because of duplicate identity'
  */
 
-var ParticipantDuplicateIdentityError = function (_TwilioError37) {
-  _inherits(ParticipantDuplicateIdentityError, _TwilioError37);
+var ParticipantDuplicateIdentityError = function (_TwilioError38) {
+  _inherits(ParticipantDuplicateIdentityError, _TwilioError38);
 
   function ParticipantDuplicateIdentityError() {
     _classCallCheck(this, ParticipantDuplicateIdentityError);
@@ -64638,8 +68037,8 @@ Object.defineProperty(TwilioErrorByCode, 53205, { value: ParticipantDuplicateIde
  * @property {string} message - 'Track is invalid'
  */
 
-var TrackInvalidError = function (_TwilioError38) {
-  _inherits(TrackInvalidError, _TwilioError38);
+var TrackInvalidError = function (_TwilioError39) {
+  _inherits(TrackInvalidError, _TwilioError39);
 
   function TrackInvalidError() {
     _classCallCheck(this, TrackInvalidError);
@@ -64661,8 +68060,8 @@ Object.defineProperty(TwilioErrorByCode, 53300, { value: TrackInvalidError });
  * @property {string} message - 'Track name is invalid'
  */
 
-var TrackNameInvalidError = function (_TwilioError39) {
-  _inherits(TrackNameInvalidError, _TwilioError39);
+var TrackNameInvalidError = function (_TwilioError40) {
+  _inherits(TrackNameInvalidError, _TwilioError40);
 
   function TrackNameInvalidError() {
     _classCallCheck(this, TrackNameInvalidError);
@@ -64684,8 +68083,8 @@ Object.defineProperty(TwilioErrorByCode, 53301, { value: TrackNameInvalidError }
  * @property {string} message - 'Track name is too long'
  */
 
-var TrackNameTooLongError = function (_TwilioError40) {
-  _inherits(TrackNameTooLongError, _TwilioError40);
+var TrackNameTooLongError = function (_TwilioError41) {
+  _inherits(TrackNameTooLongError, _TwilioError41);
 
   function TrackNameTooLongError() {
     _classCallCheck(this, TrackNameTooLongError);
@@ -64707,8 +68106,8 @@ Object.defineProperty(TwilioErrorByCode, 53302, { value: TrackNameTooLongError }
  * @property {string} message - 'Track name contains invalid characters'
  */
 
-var TrackNameCharsInvalidError = function (_TwilioError41) {
-  _inherits(TrackNameCharsInvalidError, _TwilioError41);
+var TrackNameCharsInvalidError = function (_TwilioError42) {
+  _inherits(TrackNameCharsInvalidError, _TwilioError42);
 
   function TrackNameCharsInvalidError() {
     _classCallCheck(this, TrackNameCharsInvalidError);
@@ -64730,8 +68129,8 @@ Object.defineProperty(TwilioErrorByCode, 53303, { value: TrackNameCharsInvalidEr
  * @property {string} message - 'Track name is duplicated'
  */
 
-var TrackNameIsDuplicatedError = function (_TwilioError42) {
-  _inherits(TrackNameIsDuplicatedError, _TwilioError42);
+var TrackNameIsDuplicatedError = function (_TwilioError43) {
+  _inherits(TrackNameIsDuplicatedError, _TwilioError43);
 
   function TrackNameIsDuplicatedError() {
     _classCallCheck(this, TrackNameIsDuplicatedError);
@@ -64750,16 +68149,16 @@ Object.defineProperty(TwilioErrorByCode, 53304, { value: TrackNameIsDuplicatedEr
  * @classdesc The server does not have enough resources available to create a new Track.
  * @extends TwilioError
  * @property {number} code - 53305
- * @property {string} message - 'The server has reached capacity and cannot fulfill this request.'
+ * @property {string} message - 'The server has reached capacity and cannot fulfill this request'
  */
 
-var TrackServerTrackCapacityReachedError = function (_TwilioError43) {
-  _inherits(TrackServerTrackCapacityReachedError, _TwilioError43);
+var TrackServerTrackCapacityReachedError = function (_TwilioError44) {
+  _inherits(TrackServerTrackCapacityReachedError, _TwilioError44);
 
   function TrackServerTrackCapacityReachedError() {
     _classCallCheck(this, TrackServerTrackCapacityReachedError);
 
-    return _possibleConstructorReturn(this, (TrackServerTrackCapacityReachedError.__proto__ || Object.getPrototypeOf(TrackServerTrackCapacityReachedError)).call(this, 53305, 'The server has reached capacity and cannot fulfill this request.'));
+    return _possibleConstructorReturn(this, (TrackServerTrackCapacityReachedError.__proto__ || Object.getPrototypeOf(TrackServerTrackCapacityReachedError)).call(this, 53305, 'The server has reached capacity and cannot fulfill this request'));
   }
 
   return TrackServerTrackCapacityReachedError;
@@ -64776,8 +68175,8 @@ Object.defineProperty(TwilioErrorByCode, 53305, { value: TrackServerTrackCapacit
  * @property {string} message - 'Client is unable to create or apply a local media description'
  */
 
-var MediaClientLocalDescFailedError = function (_TwilioError44) {
-  _inherits(MediaClientLocalDescFailedError, _TwilioError44);
+var MediaClientLocalDescFailedError = function (_TwilioError45) {
+  _inherits(MediaClientLocalDescFailedError, _TwilioError45);
 
   function MediaClientLocalDescFailedError() {
     _classCallCheck(this, MediaClientLocalDescFailedError);
@@ -64799,8 +68198,8 @@ Object.defineProperty(TwilioErrorByCode, 53400, { value: MediaClientLocalDescFai
  * @property {string} message - 'Server is unable to create or apply a local media description'
  */
 
-var MediaServerLocalDescFailedError = function (_TwilioError45) {
-  _inherits(MediaServerLocalDescFailedError, _TwilioError45);
+var MediaServerLocalDescFailedError = function (_TwilioError46) {
+  _inherits(MediaServerLocalDescFailedError, _TwilioError46);
 
   function MediaServerLocalDescFailedError() {
     _classCallCheck(this, MediaServerLocalDescFailedError);
@@ -64822,8 +68221,8 @@ Object.defineProperty(TwilioErrorByCode, 53401, { value: MediaServerLocalDescFai
  * @property {string} message - 'Client is unable to apply a remote media description'
  */
 
-var MediaClientRemoteDescFailedError = function (_TwilioError46) {
-  _inherits(MediaClientRemoteDescFailedError, _TwilioError46);
+var MediaClientRemoteDescFailedError = function (_TwilioError47) {
+  _inherits(MediaClientRemoteDescFailedError, _TwilioError47);
 
   function MediaClientRemoteDescFailedError() {
     _classCallCheck(this, MediaClientRemoteDescFailedError);
@@ -64845,8 +68244,8 @@ Object.defineProperty(TwilioErrorByCode, 53402, { value: MediaClientRemoteDescFa
  * @property {string} message - 'Server is unable to apply a remote media description'
  */
 
-var MediaServerRemoteDescFailedError = function (_TwilioError47) {
-  _inherits(MediaServerRemoteDescFailedError, _TwilioError47);
+var MediaServerRemoteDescFailedError = function (_TwilioError48) {
+  _inherits(MediaServerRemoteDescFailedError, _TwilioError48);
 
   function MediaServerRemoteDescFailedError() {
     _classCallCheck(this, MediaServerRemoteDescFailedError);
@@ -64868,8 +68267,8 @@ Object.defineProperty(TwilioErrorByCode, 53403, { value: MediaServerRemoteDescFa
  * @property {string} message - 'No supported codec'
  */
 
-var MediaNoSupportedCodecError = function (_TwilioError48) {
-  _inherits(MediaNoSupportedCodecError, _TwilioError48);
+var MediaNoSupportedCodecError = function (_TwilioError49) {
+  _inherits(MediaNoSupportedCodecError, _TwilioError49);
 
   function MediaNoSupportedCodecError() {
     _classCallCheck(this, MediaNoSupportedCodecError);
@@ -64885,19 +68284,19 @@ Object.defineProperty(TwilioErrorByCode, 53404, { value: MediaNoSupportedCodecEr
 
 /**
  * @class MediaConnectionError
- * @classdesc Raised by the Client or Server whenever a media connection fails.
+ * @classdesc Raised by the Client or Server whenever a media connection fails or raised by the Client whenever it detects that media has stopped flowing.
  * @extends TwilioError
  * @property {number} code - 53405
- * @property {string} message - 'Media connection failed'
+ * @property {string} message - 'Media connection failed or Media activity ceased'
  */
 
-var MediaConnectionError = function (_TwilioError49) {
-  _inherits(MediaConnectionError, _TwilioError49);
+var MediaConnectionError = function (_TwilioError50) {
+  _inherits(MediaConnectionError, _TwilioError50);
 
   function MediaConnectionError() {
     _classCallCheck(this, MediaConnectionError);
 
-    return _possibleConstructorReturn(this, (MediaConnectionError.__proto__ || Object.getPrototypeOf(MediaConnectionError)).call(this, 53405, 'Media connection failed'));
+    return _possibleConstructorReturn(this, (MediaConnectionError.__proto__ || Object.getPrototypeOf(MediaConnectionError)).call(this, 53405, 'Media connection failed or Media activity ceased'));
   }
 
   return MediaConnectionError;
@@ -64907,6 +68306,29 @@ exports.MediaConnectionError = MediaConnectionError;
 Object.defineProperty(TwilioErrorByCode, 53405, { value: MediaConnectionError });
 
 /**
+ * @class MediaDTLSTransportFailedError
+ * @classdesc There was a problem while negotiating with the remote DTLS peer. Therefore the Participant will not be able to publish or subscribe to Tracks.
+ * @extends TwilioError
+ * @property {number} code - 53407
+ * @property {string} message - 'Media connection failed due to DTLS handshake failure'
+ */
+
+var MediaDTLSTransportFailedError = function (_TwilioError51) {
+  _inherits(MediaDTLSTransportFailedError, _TwilioError51);
+
+  function MediaDTLSTransportFailedError() {
+    _classCallCheck(this, MediaDTLSTransportFailedError);
+
+    return _possibleConstructorReturn(this, (MediaDTLSTransportFailedError.__proto__ || Object.getPrototypeOf(MediaDTLSTransportFailedError)).call(this, 53407, 'Media connection failed due to DTLS handshake failure'));
+  }
+
+  return MediaDTLSTransportFailedError;
+}(TwilioError);
+
+exports.MediaDTLSTransportFailedError = MediaDTLSTransportFailedError;
+Object.defineProperty(TwilioErrorByCode, 53407, { value: MediaDTLSTransportFailedError });
+
+/**
  * @class ConfigurationAcquireFailedError
  * @classdesc Raised whenever the Client is unable to acquire configuration information from the Server.
  * @extends TwilioError
@@ -64914,8 +68336,8 @@ Object.defineProperty(TwilioErrorByCode, 53405, { value: MediaConnectionError })
  * @property {string} message - 'Unable to acquire configuration'
  */
 
-var ConfigurationAcquireFailedError = function (_TwilioError50) {
-  _inherits(ConfigurationAcquireFailedError, _TwilioError50);
+var ConfigurationAcquireFailedError = function (_TwilioError52) {
+  _inherits(ConfigurationAcquireFailedError, _TwilioError52);
 
   function ConfigurationAcquireFailedError() {
     _classCallCheck(this, ConfigurationAcquireFailedError);
@@ -64937,8 +68359,8 @@ Object.defineProperty(TwilioErrorByCode, 53500, { value: ConfigurationAcquireFai
  * @property {string} message - 'Unable to acquire TURN credentials'
  */
 
-var ConfigurationAcquireTurnFailedError = function (_TwilioError51) {
-  _inherits(ConfigurationAcquireTurnFailedError, _TwilioError51);
+var ConfigurationAcquireTurnFailedError = function (_TwilioError53) {
+  _inherits(ConfigurationAcquireTurnFailedError, _TwilioError53);
 
   function ConfigurationAcquireTurnFailedError() {
     _classCallCheck(this, ConfigurationAcquireTurnFailedError);
@@ -65152,6 +68574,275 @@ exports.validateObject = validateObject;
 
 /***/ }),
 
+/***/ "./node_modules/twilio-video/es5/vendor/loglevel.js":
+/*!**********************************************************!*\
+  !*** ./node_modules/twilio-video/es5/vendor/loglevel.js ***!
+  \**********************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+/**
+ * Copyright (c) 2013 Tim Perry
+ * Licensed under the MIT license.
+ *
+ * Copied from https://github.com/pimterry/loglevel (1.7.0)
+ * and modified to remove browser and AMD module support, while keeping CommonJS.
+ * It was causing a conflict when this is bundled using CommonJS, and then loaded via RequireJS.
+ * The proper way to fix this module is to have a build that outputs CommonJS and AMD separately
+ * which needs to be submitted to the original module's repo.
+ */
+
+/* istanbul ignore file */
+/* eslint-disable */
+// Slightly dubious tricks to cut down minimized file size
+var noop = function noop() {};
+var undefinedType = "undefined";
+var isIE = (typeof window === "undefined" ? "undefined" : _typeof(window)) !== undefinedType && _typeof(window.navigator) !== undefinedType && /Trident\/|MSIE /.test(window.navigator.userAgent);
+
+var logMethods = ["trace", "debug", "info", "warn", "error"];
+
+// Cross-browser bind equivalent that works at least back to IE6
+function bindMethod(obj, methodName) {
+    var method = obj[methodName];
+    if (typeof method.bind === 'function') {
+        return method.bind(obj);
+    } else {
+        try {
+            return Function.prototype.bind.call(method, obj);
+        } catch (e) {
+            // Missing bind shim or IE8 + Modernizr, fallback to wrapping
+            return function () {
+                return Function.prototype.apply.apply(method, [obj, arguments]);
+            };
+        }
+    }
+}
+
+// Trace() doesn't print the message in IE, so for that case we need to wrap it
+function traceForIE() {
+    if (console.log) {
+        if (console.log.apply) {
+            console.log.apply(console, arguments);
+        } else {
+            // In old IE, native console methods themselves don't have apply().
+            Function.prototype.apply.apply(console.log, [console, arguments]);
+        }
+    }
+    if (console.trace) console.trace();
+}
+
+// Build the best logging method possible for this env
+// Wherever possible we want to bind, not wrap, to preserve stack traces
+function realMethod(methodName) {
+    if (methodName === 'debug') {
+        methodName = 'log';
+    }
+
+    if ((typeof console === "undefined" ? "undefined" : _typeof(console)) === undefinedType) {
+        return false; // No method possible, for now - fixed later by enableLoggingWhenConsoleArrives
+    } else if (methodName === 'trace' && isIE) {
+        return traceForIE;
+    } else if (console[methodName] !== undefined) {
+        return bindMethod(console, methodName);
+    } else if (console.log !== undefined) {
+        return bindMethod(console, 'log');
+    } else {
+        return noop;
+    }
+}
+
+// These private functions always need `this` to be set properly
+
+function replaceLoggingMethods(level, loggerName) {
+    /*jshint validthis:true */
+    for (var i = 0; i < logMethods.length; i++) {
+        var methodName = logMethods[i];
+        this[methodName] = i < level ? noop : this.methodFactory(methodName, level, loggerName);
+    }
+
+    // Define log.log as an alias for log.debug
+    this.log = this.debug;
+}
+
+// In old IE versions, the console isn't present until you first open it.
+// We build realMethod() replacements here that regenerate logging methods
+function enableLoggingWhenConsoleArrives(methodName, level, loggerName) {
+    return function () {
+        if ((typeof console === "undefined" ? "undefined" : _typeof(console)) !== undefinedType) {
+            replaceLoggingMethods.call(this, level, loggerName);
+            this[methodName].apply(this, arguments);
+        }
+    };
+}
+
+// By default, we use closely bound real methods wherever possible, and
+// otherwise we wait for a console to appear, and then try again.
+function defaultMethodFactory(methodName, level, loggerName) {
+    /*jshint validthis:true */
+    return realMethod(methodName) || enableLoggingWhenConsoleArrives.apply(this, arguments);
+}
+
+function Logger(name, defaultLevel, factory) {
+    var self = this;
+    var currentLevel;
+
+    var storageKey = "loglevel";
+    if (typeof name === "string") {
+        storageKey += ":" + name;
+    } else if ((typeof name === "undefined" ? "undefined" : _typeof(name)) === "symbol") {
+        storageKey = undefined;
+    }
+
+    function persistLevelIfPossible(levelNum) {
+        var levelName = (logMethods[levelNum] || 'silent').toUpperCase();
+
+        if ((typeof window === "undefined" ? "undefined" : _typeof(window)) === undefinedType || !storageKey) return;
+
+        // Use localStorage if available
+        try {
+            window.localStorage[storageKey] = levelName;
+            return;
+        } catch (ignore) {}
+
+        // Use session cookie as fallback
+        try {
+            window.document.cookie = encodeURIComponent(storageKey) + "=" + levelName + ";";
+        } catch (ignore) {}
+    }
+
+    function getPersistedLevel() {
+        var storedLevel;
+
+        if ((typeof window === "undefined" ? "undefined" : _typeof(window)) === undefinedType || !storageKey) return;
+
+        try {
+            storedLevel = window.localStorage[storageKey];
+        } catch (ignore) {}
+
+        // Fallback to cookies if local storage gives us nothing
+        if ((typeof storedLevel === "undefined" ? "undefined" : _typeof(storedLevel)) === undefinedType) {
+            try {
+                var cookie = window.document.cookie;
+                var location = cookie.indexOf(encodeURIComponent(storageKey) + "=");
+                if (location !== -1) {
+                    storedLevel = /^([^;]+)/.exec(cookie.slice(location))[1];
+                }
+            } catch (ignore) {}
+        }
+
+        // If the stored level is not valid, treat it as if nothing was stored.
+        if (self.levels[storedLevel] === undefined) {
+            storedLevel = undefined;
+        }
+
+        return storedLevel;
+    }
+
+    /*
+     *
+     * Public logger API - see https://github.com/pimterry/loglevel for details
+     *
+     */
+
+    self.name = name;
+
+    self.levels = { "TRACE": 0, "DEBUG": 1, "INFO": 2, "WARN": 3,
+        "ERROR": 4, "SILENT": 5 };
+
+    self.methodFactory = factory || defaultMethodFactory;
+
+    self.getLevel = function () {
+        return currentLevel;
+    };
+
+    self.setLevel = function (level, persist) {
+        if (typeof level === "string" && self.levels[level.toUpperCase()] !== undefined) {
+            level = self.levels[level.toUpperCase()];
+        }
+        if (typeof level === "number" && level >= 0 && level <= self.levels.SILENT) {
+            currentLevel = level;
+            if (persist !== false) {
+                // defaults to true
+                persistLevelIfPossible(level);
+            }
+            replaceLoggingMethods.call(self, level, name);
+            if ((typeof console === "undefined" ? "undefined" : _typeof(console)) === undefinedType && level < self.levels.SILENT) {
+                return "No console available for logging";
+            }
+        } else {
+            throw "log.setLevel() called with invalid level: " + level;
+        }
+    };
+
+    self.setDefaultLevel = function (level) {
+        if (!getPersistedLevel()) {
+            self.setLevel(level, false);
+        }
+    };
+
+    self.enableAll = function (persist) {
+        self.setLevel(self.levels.TRACE, persist);
+    };
+
+    self.disableAll = function (persist) {
+        self.setLevel(self.levels.SILENT, persist);
+    };
+
+    // Initialize with the right level
+    var initialLevel = getPersistedLevel();
+    if (initialLevel == null) {
+        initialLevel = defaultLevel == null ? "WARN" : defaultLevel;
+    }
+    self.setLevel(initialLevel, false);
+}
+
+/*
+ *
+ * Top-level API
+ *
+ */
+
+var defaultLogger = new Logger();
+
+var _loggersByName = {};
+defaultLogger.getLogger = function getLogger(name) {
+    if ((typeof name === "undefined" ? "undefined" : _typeof(name)) !== "symbol" && typeof name !== "string" || name === "") {
+        throw new TypeError("You must supply a name when creating a logger.");
+    }
+
+    var logger = _loggersByName[name];
+    if (!logger) {
+        logger = _loggersByName[name] = new Logger(name, defaultLogger.getLevel(), defaultLogger.methodFactory);
+    }
+    return logger;
+};
+
+// Grab the current global log variable in case of overwrite
+var _log = (typeof window === "undefined" ? "undefined" : _typeof(window)) !== undefinedType ? window.log : undefined;
+defaultLogger.noConflict = function () {
+    if ((typeof window === "undefined" ? "undefined" : _typeof(window)) !== undefinedType && window.log === defaultLogger) {
+        window.log = _log;
+    }
+
+    return defaultLogger;
+};
+
+defaultLogger.getLoggers = function getLoggers() {
+    return _loggersByName;
+};
+
+// ES6 default export, for compatibility
+defaultLogger['default'] = defaultLogger;
+
+module.exports = defaultLogger;
+
+/***/ }),
+
 /***/ "./node_modules/twilio-video/es5/webaudio/audiocontext.js":
 /*!****************************************************************!*\
   !*** ./node_modules/twilio-video/es5/webaudio/audiocontext.js ***!
@@ -65316,8 +69007,10 @@ function detectSilence(audioContext, stream, timeout) {
       return Promise.resolve(true);
     }
     analyser.getByteTimeDomainData(samples);
+    // NOTE(mpatwardhan): An audio MediaStreamTrack can be silent either due to all samples
+    // being equal to 128 or all samples being equal to 0.
     return samples.some(function (sample) {
-      return sample;
+      return sample !== 128 && sample !== 0;
     }) ? Promise.resolve(false) : delay().then(doDetectSilence);
   }
 
@@ -65382,7 +69075,8 @@ function workaround(log, getUserMedia, constraints, n, timeout) {
    */
   function doWorkaround() {
     return getUserMedia(constraints).then(function (stream) {
-      var isSilentPromise = constraints.audio ? detectSilence(audioContext, stream, timeout).catch(function () {
+      var isSilentPromise = constraints.audio ? detectSilence(audioContext, stream, timeout).catch(function (err) {
+        log.warn('Encountered an error while detecting silence', err);
         return true;
       }) : Promise.resolve(false);
       return isSilentPromise.then(function (isSilent) {
@@ -65421,10 +69115,10 @@ module.exports = workaround;
 /*!************************************************!*\
   !*** ./node_modules/twilio-video/package.json ***!
   \************************************************/
-/*! exports provided: _args, _from, _id, _inBundle, _integrity, _location, _phantomChildren, _requested, _requiredBy, _resolved, _spec, _where, author, browser, bugs, contributors, dependencies, description, devDependencies, engines, homepage, keywords, license, main, name, repository, scripts, title, version, default */
+/*! exports provided: _from, _id, _inBundle, _integrity, _location, _phantomChildren, _requested, _requiredBy, _resolved, _shasum, _spec, _where, author, browser, bugs, bundleDependencies, contributors, dependencies, deprecated, description, devDependencies, engines, homepage, keywords, license, main, name, repository, scripts, title, types, version, default */
 /***/ (function(module) {
 
-module.exports = JSON.parse("{\"_args\":[[\"twilio-video@2.0.0\",\"/Users/mbattle/Sites/laravel-video-conference-app\"]],\"_from\":\"twilio-video@2.0.0\",\"_id\":\"twilio-video@2.0.0\",\"_inBundle\":false,\"_integrity\":\"sha512-805DBxcuL1JIP+XMCd2IAOLb4KpbiS8bjW3WvyuhbNUOlTVxxiydVDUCkhAIgOPeYSRWxdcxc6RXHK9oTfJviA==\",\"_location\":\"/twilio-video\",\"_phantomChildren\":{\"async-limiter\":\"1.0.1\",\"safe-buffer\":\"5.1.2\",\"ultron\":\"1.1.1\"},\"_requested\":{\"type\":\"version\",\"registry\":true,\"raw\":\"twilio-video@2.0.0\",\"name\":\"twilio-video\",\"escapedName\":\"twilio-video\",\"rawSpec\":\"2.0.0\",\"saveSpec\":null,\"fetchSpec\":\"2.0.0\"},\"_requiredBy\":[\"/\"],\"_resolved\":\"https://registry.npmjs.org/twilio-video/-/twilio-video-2.0.0.tgz\",\"_spec\":\"2.0.0\",\"_where\":\"/Users/mbattle/Sites/laravel-video-conference-app\",\"author\":{\"name\":\"Mark Andrus Roberts\",\"email\":\"mroberts@twilio.com\"},\"browser\":{\"ws\":\"./src/ws.js\",\"xmlhttprequest\":\"./src/xmlhttprequest.js\"},\"bugs\":{\"url\":\"https://github.com/twilio/twilio-video.js/issues\"},\"contributors\":[{\"name\":\"Ryan Rowland\",\"email\":\"rrowland@twilio.com\"},{\"name\":\"Manjesh Malavalli\",\"email\":\"mmalavalli@twilio.com\"},{\"name\":\"Makarand Patwardhan\",\"email\":\"mpatwardhan@twilio.com\"}],\"dependencies\":{\"@twilio/webrtc\":\"4.1.3\",\"ws\":\"^3.3.1\",\"xmlhttprequest\":\"^1.8.0\"},\"description\":\"Twilio Video JavaScript library\",\"devDependencies\":{\"@types/express\":\"^4.11.0\",\"@types/node\":\"^8.5.1\",\"@types/selenium-webdriver\":\"^3.0.8\",\"@types/ws\":\"^3.2.1\",\"babel-cli\":\"^6.26.0\",\"babel-preset-es2015\":\"^6.24.1\",\"browserify\":\"^14.3.0\",\"cheerio\":\"^0.22.0\",\"chromedriver\":\"2.28.0\",\"cors\":\"^2.8.5\",\"electron\":\"^5.0.1\",\"envify\":\"^4.0.0\",\"eslint\":\"^6.2.1\",\"eslint-config-standard\":\"^14.0.0\",\"eslint-plugin-import\":\"^2.18.2\",\"eslint-plugin-node\":\"^9.1.0\",\"eslint-plugin-promise\":\"^4.2.1\",\"eslint-plugin-standard\":\"^4.0.1\",\"express\":\"^4.16.2\",\"geckodriver\":\"1.4.0\",\"ink-docstrap\":\"^1.3.2\",\"inquirer\":\"^7.0.0\",\"is-docker\":\"^2.0.0\",\"istanbul\":\"^0.4.5\",\"jsdoc\":\"^3.5.5\",\"json-loader\":\"^0.5.7\",\"karma\":\"^1.6.0\",\"karma-browserify\":\"^5.1.1\",\"karma-chrome-launcher\":\"^2.0.0\",\"karma-electron\":\"^6.1.0\",\"karma-firefox-launcher\":\"^1.0.1\",\"karma-htmlfile-reporter\":\"^0.3.8\",\"karma-junit-reporter\":\"^1.2.0\",\"karma-mocha\":\"^1.3.0\",\"karma-safari-launcher\":\"^1.0.0\",\"karma-spec-reporter\":\"0.0.32\",\"mocha\":\"^3.2.0\",\"npm-run-all\":\"^4.0.2\",\"puppeteer\":\"^1.11.0\",\"release-tool\":\"^0.2.2\",\"requirejs\":\"^2.3.3\",\"rimraf\":\"^2.6.1\",\"selenium-webdriver\":\"3.3.0\",\"simple-git\":\"^1.126.0\",\"sinon\":\"^4.0.1\",\"travis-multirunner\":\"^4.0.0\",\"ts-node\":\"4.0.1\",\"tslint\":\"5.8.0\",\"twilio\":\"^2.11.1\",\"typescript\":\"2.6.2\",\"uglify-js\":\"^2.8.22\",\"vinyl-fs\":\"^2.4.4\",\"vinyl-source-stream\":\"^1.1.0\",\"watchify\":\"^3.11.1\",\"webrtc-adapter\":\"^4.1.1\"},\"engines\":{\"node\":\">=0.12\"},\"homepage\":\"https://twilio.com\",\"keywords\":[\"twilio\",\"webrtc\",\"library\",\"javascript\",\"video\",\"rooms\"],\"license\":\"BSD-3-Clause\",\"main\":\"./es5/index.js\",\"name\":\"twilio-video\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/twilio/twilio-video.js.git\"},\"scripts\":{\"build\":\"npm-run-all clean lint docs cover test:integration build:es5 build:js build:min.js test:umd\",\"build:docker\":\"npm-run-all clean lint docs cover test:integration:travis build:es5 build:js build:min.js\",\"build:es5\":\"rimraf ./es5 && babel lib -d es5\",\"build:js\":\"node ./scripts/build.js ./src/twilio-video.js ./LICENSE.md ./dist/twilio-video.js\",\"build:min.js\":\"uglifyjs ./dist/twilio-video.js -o ./dist/twilio-video.min.js --comments \\\"/^! twilio-video.js/\\\" -b beautify=false,ascii_only=true\",\"build:quick\":\"npm-run-all clean lint docs build:es5 build:js build:min.js\",\"build:travis\":\"npm-run-all clean lint docs cover build:es5 build:js build:min.js test:umd test:framework\",\"clean\":\"rimraf ./coverage ./es5 ./dist\",\"cover\":\"istanbul cover node_modules/mocha/bin/_mocha -- ./test/unit/index.js\",\"docs\":\"node ./scripts/docs.js ./dist/docs\",\"lint\":\"eslint ./lib ./test/*.js ./docker/**/*.js ./test/framework/*.js ./test/lib/*.js ./test/integration/** ./test/unit/**\",\"test\":\"npm-run-all test:unit test:integration\",\"test:crossbrowser\":\"npm-run-all test:crossbrowser:*\",\"test:crossbrowser:build\":\"npm-run-all test:crossbrowser:build:*\",\"test:crossbrowser:build:browser\":\"cd ./test/crossbrowser && browserify lib/crossbrowser/src/browser/index.js > src/browser/index.js\",\"test:crossbrowser:build:clean\":\"rimraf ./test/crossbrowser/lib ./test/crossbrowser/src/browser/index.js\",\"test:crossbrowser:build:lint\":\"cd ./test/crossbrowser && tslint --project tsconfig.json\",\"test:crossbrowser:build:tsc\":\"cd ./test/crossbrowser && tsc\",\"test:crossbrowser:test\":\"cd ./test/crossbrowser && mocha --compilers ts:ts-node/register test/integration/spec/**/*.ts\",\"test:framework\":\"npm-run-all test:framework:angular test:framework:no-framework test:framework:react\",\"test:framework:angular\":\"npm-run-all test:framework:angular:*\",\"test:framework:angular:install\":\"cd ./test/framework/twilio-video-angular && rimraf ./node_modules && npm install\",\"test:framework:angular:run\":\"mocha ./test/framework/twilio-video-angular.js\",\"test:framework:no-framework\":\"npm-run-all test:framework:no-framework:*\",\"test:framework:no-framework:run\":\"mocha ./test/framework/twilio-video-no-framework.js\",\"test:framework:react\":\"npm-run-all test:framework:react:*\",\"test:framework:react:build\":\"cd ./test/framework/twilio-video-react && npm run build\",\"test:framework:react:install\":\"cd ./test/framework/twilio-video-react && rimraf ./node_modules && npm install\",\"test:framework:react:run\":\"mocha ./test/framework/twilio-video-react.js\",\"test:framework:react:test\":\"node ./scripts/framework.js twilio-video-react\",\"test:integration\":\"node ./scripts/karma.js karma/integration.conf.js\",\"test:integration:adapter\":\"node ./scripts/karma.js karma/integration.adapter.conf.js\",\"test:integration:travis\":\"node ./scripts/integration.js\",\"test:sdkdriver\":\"npm-run-all test:sdkdriver:*\",\"test:sdkdriver:build\":\"npm-run-all test:sdkdriver:build:*\",\"test:sdkdriver:build:clean\":\"rimraf ./test/lib/sdkdriver/lib ./test/lib/sdkdriver/test/integration/browser/index.js\",\"test:sdkdriver:build:lint\":\"cd ./test/lib/sdkdriver && tslint --project tsconfig.json\",\"test:sdkdriver:build:tsc\":\"cd ./test/lib/sdkdriver && tsc --rootDir src\",\"test:sdkdriver:test\":\"npm-run-all test:sdkdriver:test:*\",\"test:sdkdriver:test:integration\":\"npm-run-all test:sdkdriver:test:integration:*\",\"test:sdkdriver:test:integration:browser\":\"cd ./test/lib/sdkdriver/test/integration && browserify browser/browser.js > browser/index.js\",\"test:sdkdriver:test:integration:run\":\"cd ./test/lib/sdkdriver && mocha --compilers ts:ts-node/register test/integration/spec/**/*.ts\",\"test:sdkdriver:test:unit\":\"cd ./test/lib/sdkdriver && mocha --compilers ts:ts-node/register test/unit/spec/**/*.ts\",\"test:umd\":\"mocha ./test/umd/index.js\",\"test:unit\":\"mocha ./test/unit/index.js\"},\"title\":\"Twilio Video\",\"version\":\"2.0.0\"}");
+module.exports = JSON.parse("{\"_from\":\"twilio-video@2.12.0\",\"_id\":\"twilio-video@2.12.0\",\"_inBundle\":false,\"_integrity\":\"sha512-LfR7Z005yYVcWJpkZR39zBYA6PymaQy+AX1q8Ag4eiFP4CqxUcgpf8mGJcIG7kZQevOLXSPnImlt8Od5ButAtg==\",\"_location\":\"/twilio-video\",\"_phantomChildren\":{\"async-limiter\":\"1.0.1\",\"safe-buffer\":\"5.1.2\",\"ultron\":\"1.1.1\"},\"_requested\":{\"type\":\"version\",\"registry\":true,\"raw\":\"twilio-video@2.12.0\",\"name\":\"twilio-video\",\"escapedName\":\"twilio-video\",\"rawSpec\":\"2.12.0\",\"saveSpec\":null,\"fetchSpec\":\"2.12.0\"},\"_requiredBy\":[\"#USER\",\"/\"],\"_resolved\":\"https://registry.npmjs.org/twilio-video/-/twilio-video-2.12.0.tgz\",\"_shasum\":\"821d68f7bea5ecbe0bbd7588a8bedb57c330a2ad\",\"_spec\":\"twilio-video@2.12.0\",\"_where\":\"/Users/mbattle/Sites/laravel-video-conference-app\",\"author\":{\"name\":\"Mark Andrus Roberts\",\"email\":\"mroberts@twilio.com\"},\"browser\":{\"ws\":\"./src/ws.js\",\"xmlhttprequest\":\"./src/xmlhttprequest.js\"},\"bugs\":{\"url\":\"https://github.com/twilio/twilio-video.js/issues\"},\"bundleDependencies\":false,\"contributors\":[{\"name\":\"Ryan Rowland\",\"email\":\"rrowland@twilio.com\"},{\"name\":\"Manjesh Malavalli\",\"email\":\"mmalavalli@twilio.com\"},{\"name\":\"Makarand Patwardhan\",\"email\":\"mpatwardhan@twilio.com\"}],\"dependencies\":{\"@twilio/webrtc\":\"4.3.2\",\"backoff\":\"^2.5.0\",\"ws\":\"^3.3.1\",\"xmlhttprequest\":\"^1.8.0\"},\"deprecated\":false,\"description\":\"Twilio Video JavaScript Library\",\"devDependencies\":{\"@types/express\":\"^4.11.0\",\"@types/node\":\"^8.5.1\",\"@types/selenium-webdriver\":\"^3.0.8\",\"@types/ws\":\"^3.2.1\",\"@typescript-eslint/eslint-plugin\":\"^4.13.0\",\"@typescript-eslint/parser\":\"^3.10.1\",\"babel-cli\":\"^6.26.0\",\"babel-preset-es2015\":\"^6.24.1\",\"browserify\":\"^17.0.0\",\"cheerio\":\"^0.22.0\",\"cors\":\"^2.8.5\",\"electron\":\"^9.1.0\",\"envify\":\"^4.0.0\",\"eslint\":\"^6.2.1\",\"eslint-config-standard\":\"^14.0.0\",\"eslint-plugin-import\":\"^2.18.2\",\"eslint-plugin-node\":\"^9.1.0\",\"eslint-plugin-promise\":\"^4.2.1\",\"eslint-plugin-standard\":\"^4.0.1\",\"express\":\"^4.16.2\",\"ink-docstrap\":\"^1.3.2\",\"inquirer\":\"^7.0.0\",\"is-docker\":\"^2.0.0\",\"istanbul\":\"^0.4.5\",\"jsdoc\":\"^3.5.5\",\"json-loader\":\"^0.5.7\",\"karma\":\"^5.0.2\",\"karma-browserify\":\"^7.0.0\",\"karma-chrome-launcher\":\"^2.0.0\",\"karma-edgium-launcher\":\"^4.0.0-0\",\"karma-electron\":\"^6.1.0\",\"karma-firefox-launcher\":\"^1.3.0\",\"karma-htmlfile-reporter\":\"^0.3.8\",\"karma-junit-reporter\":\"^1.2.0\",\"karma-mocha\":\"^1.3.0\",\"karma-safari-launcher\":\"^1.0.0\",\"karma-spec-reporter\":\"0.0.32\",\"mocha\":\"^3.2.0\",\"node-http-server\":\"^8.1.2\",\"npm-run-all\":\"^4.0.2\",\"requirejs\":\"^2.3.3\",\"rimraf\":\"^2.6.1\",\"simple-git\":\"^1.126.0\",\"sinon\":\"^4.0.1\",\"ts-node\":\"4.0.1\",\"tslint\":\"5.8.0\",\"twilio\":\"^3.49.0\",\"twilio-release-tool\":\"^1.0.0\",\"typescript\":\"^4.0.5\",\"uglify-js\":\"^2.8.22\",\"vinyl-fs\":\"^2.4.4\",\"vinyl-source-stream\":\"^1.1.0\",\"watchify\":\"^3.11.1\",\"webrtc-adapter\":\"^4.1.1\"},\"engines\":{\"node\":\">=0.12\"},\"homepage\":\"https://twilio.com\",\"keywords\":[\"twilio\",\"webrtc\",\"library\",\"javascript\",\"video\",\"rooms\"],\"license\":\"BSD-3-Clause\",\"main\":\"./es5/index.js\",\"name\":\"twilio-video\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/twilio/twilio-video.js.git\"},\"scripts\":{\"build\":\"npm-run-all clean lint docs cover test:integration build:es5 build:js build:min.js test:umd\",\"build:es5\":\"rimraf ./es5 && babel lib -d es5\",\"build:js\":\"node ./scripts/build.js ./src/twilio-video.js ./LICENSE.md ./dist/twilio-video.js\",\"build:min.js\":\"uglifyjs ./dist/twilio-video.js -o ./dist/twilio-video.min.js --comments \\\"/^! twilio-video.js/\\\" -b beautify=false,ascii_only=true\",\"build:quick\":\"npm-run-all clean lint docs build:es5 build:js build:min.js build:ts\",\"build:ts\":\"tsc -p tsconfig.json --noEmit\",\"clean\":\"rimraf ./coverage ./es5 ./dist\",\"cover\":\"istanbul cover node_modules/mocha/bin/_mocha -- ./test/unit/index.js\",\"docs\":\"node ./scripts/docs.js ./dist/docs\",\"lint\":\"npm-run-all lint:js lint:ts\",\"lint:js\":\"eslint ./lib ./test/*.js ./docker/**/*.js ./test/framework/*.js ./test/lib/*.js ./test/integration/** ./test/unit/** \",\"lint:ts\":\"eslint ./tsdef/*.ts\",\"test\":\"npm-run-all test:unit test:integration\",\"test:crossbrowser\":\"npm-run-all test:crossbrowser:*\",\"test:crossbrowser:build\":\"npm-run-all test:crossbrowser:build:*\",\"test:crossbrowser:build:browser\":\"cd ./test/crossbrowser && browserify lib/crossbrowser/src/browser/index.js > src/browser/index.js\",\"test:crossbrowser:build:clean\":\"rimraf ./test/crossbrowser/lib ./test/crossbrowser/src/browser/index.js\",\"test:crossbrowser:build:lint\":\"cd ./test/crossbrowser && tslint --project tsconfig.json\",\"test:crossbrowser:build:tsc\":\"cd ./test/crossbrowser && tsc\",\"test:crossbrowser:test\":\"cd ./test/crossbrowser && mocha --compilers ts:ts-node/register test/integration/spec/**/*.ts\",\"test:framework\":\"npm-run-all test:framework:install test:framework:no-framework test:framework:react\",\"test:framework:angular\":\"npm-run-all test:framework:angular:*\",\"test:framework:angular:install\":\"cd ./test/framework/twilio-video-angular && rimraf ./node_modules package-lock.json && npm install\",\"test:framework:angular:run\":\"mocha ./test/framework/twilio-video-angular.js\",\"test:framework:install\":\"npm install chromedriver && npm install selenium-webdriver && npm install geckodriver && npm install puppeteer\",\"test:framework:no-framework\":\"npm-run-all test:framework:no-framework:*\",\"test:framework:no-framework:run\":\"mocha ./test/framework/twilio-video-no-framework.js\",\"test:framework:react\":\"npm-run-all test:framework:react:*\",\"test:framework:react:build\":\"cd ./test/framework/twilio-video-react && npm run build\",\"test:framework:react:install\":\"cd ./test/framework/twilio-video-react && rimraf ./node_modules package-lock.json && npm install\",\"test:framework:react:run\":\"mocha ./test/framework/twilio-video-react.js\",\"test:framework:react:test\":\"node ./scripts/framework.js twilio-video-react\",\"test:integration\":\"node ./scripts/karma.js karma/integration.conf.js\",\"test:integration:adapter\":\"node ./scripts/karma.js karma/integration.adapter.conf.js\",\"test:sdkdriver\":\"npm-run-all test:sdkdriver:*\",\"test:sdkdriver:build\":\"npm-run-all test:sdkdriver:build:*\",\"test:sdkdriver:build:clean\":\"rimraf ./test/lib/sdkdriver/lib ./test/lib/sdkdriver/test/integration/browser/index.js\",\"test:sdkdriver:build:lint\":\"cd ./test/lib/sdkdriver && tslint --project tsconfig.json\",\"test:sdkdriver:build:tsc\":\"cd ./test/lib/sdkdriver && tsc --rootDir src\",\"test:sdkdriver:test\":\"npm-run-all test:sdkdriver:test:*\",\"test:sdkdriver:test:integration\":\"npm-run-all test:sdkdriver:test:integration:*\",\"test:sdkdriver:test:integration:browser\":\"cd ./test/lib/sdkdriver/test/integration && browserify browser/browser.js > browser/index.js\",\"test:sdkdriver:test:integration:run\":\"cd ./test/lib/sdkdriver && mocha --compilers ts:ts-node/register test/integration/spec/**/*.ts\",\"test:sdkdriver:test:unit\":\"cd ./test/lib/sdkdriver && mocha --compilers ts:ts-node/register test/unit/spec/**/*.ts\",\"test:umd\":\"mocha ./test/umd/index.js\",\"test:umd:install\":\"npm install puppeteer@5.5.0\",\"test:unit\":\"mocha ./test/unit/index.js\"},\"title\":\"Twilio Video\",\"types\":\"./tsdef/index.d.ts\",\"version\":\"2.12.0\"}");
 
 /***/ }),
 
@@ -65436,18 +69130,6 @@ module.exports = JSON.parse("{\"_args\":[[\"twilio-video@2.0.0\",\"/Users/mbattl
 /***/ (function(module, exports) {
 
 module.exports = WebSocket;
-
-
-/***/ }),
-
-/***/ "./node_modules/twilio-video/src/xmlhttprequest.js":
-/*!*********************************************************!*\
-  !*** ./node_modules/twilio-video/src/xmlhttprequest.js ***!
-  \*********************************************************/
-/*! no static exports found */
-/***/ (function(module, exports) {
-
-exports.XMLHttpRequest = XMLHttpRequest;
 
 
 /***/ }),
