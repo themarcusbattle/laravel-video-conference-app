@@ -3257,7 +3257,7 @@ exports.updateUnifiedPlanTrackIdsToSSRCs = updateUnifiedPlanTrackIdsToSSRCs;
 /*! exports provided: _args, _from, _id, _inBundle, _integrity, _location, _phantomChildren, _requested, _requiredBy, _resolved, _spec, _where, author, bugs, contributors, description, devDependencies, homepage, keywords, license, main, name, repository, scripts, version, default */
 /***/ (function(module) {
 
-module.exports = JSON.parse("{\"_args\":[[\"@twilio/webrtc@4.1.3\",\"/Users/mbattle/Sites/mbattle-laravel-video-chat-room\"]],\"_from\":\"@twilio/webrtc@4.1.3\",\"_id\":\"@twilio/webrtc@4.1.3\",\"_inBundle\":false,\"_integrity\":\"sha512-0KjCrrpczoWQTO5RSBg+ZCDvrlgjBLhjPYN9SKstlIsOnEgtg6H1EsUt6CP7FFWLh9J3iQNuclC1gVib1PQpKw==\",\"_location\":\"/@twilio/webrtc\",\"_phantomChildren\":{},\"_requested\":{\"type\":\"version\",\"registry\":true,\"raw\":\"@twilio/webrtc@4.1.3\",\"name\":\"@twilio/webrtc\",\"escapedName\":\"@twilio%2fwebrtc\",\"scope\":\"@twilio\",\"rawSpec\":\"4.1.3\",\"saveSpec\":null,\"fetchSpec\":\"4.1.3\"},\"_requiredBy\":[\"/twilio-video\"],\"_resolved\":\"https://registry.npmjs.org/@twilio/webrtc/-/webrtc-4.1.3.tgz\",\"_spec\":\"4.1.3\",\"_where\":\"/Users/mbattle/Sites/mbattle-laravel-video-chat-room\",\"author\":{\"name\":\"Manjesh Malavalli\",\"email\":\"mmalavalli@twilio.com\"},\"bugs\":{\"url\":\"https://github.com/twilio/twilio-webrtc.js/issues\"},\"contributors\":[{\"name\":\"Mark Roberts\",\"email\":\"mroberts@twilio.com\"},{\"name\":\"Ryan Rowland\",\"email\":\"rrowland@twilio.com\"}],\"description\":\"WebRTC-related APIs and shims used by twilio-video.js\",\"devDependencies\":{\"browserify\":\"^14.4.0\",\"electron\":\"^5.0.0\",\"envify\":\"^4.1.0\",\"eslint\":\"^4.4.1\",\"istanbul\":\"^0.4.5\",\"karma\":\"^1.7.0\",\"karma-browserify\":\"^5.1.1\",\"karma-chrome-launcher\":\"^2.2.0\",\"karma-electron\":\"^6.1.0\",\"karma-firefox-launcher\":\"^1.0.1\",\"karma-mocha\":\"^1.3.0\",\"karma-safari-launcher\":\"~0.1\",\"karma-spec-reporter\":\"0.0.31\",\"mocha\":\"^3.5.0\",\"npm-run-all\":\"^4.0.2\",\"release-tool\":\"^0.2.2\",\"rimraf\":\"^2.6.1\",\"travis-multirunner\":\"^4.2.3\",\"watchify\":\"^3.9.0\",\"webrtc-adapter\":\"^6.4.8\"},\"homepage\":\"https://github.com/twilio/twilio-webrtc.js#readme\",\"keywords\":[\"shim\",\"twilio\",\"video\",\"webrtc\"],\"license\":\"BSD-3-Clause\",\"main\":\"./lib/index.js\",\"name\":\"@twilio/webrtc\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/twilio/twilio-webrtc.js.git\"},\"scripts\":{\"build\":\"npm-run-all clean lint test\",\"clean\":\"rimraf coverage\",\"lint\":\"eslint ./lib\",\"test\":\"npm-run-all test:*\",\"test:integration\":\"npm-run-all test:integration:*\",\"test:integration:adapter\":\"karma start karma/integration.adapter.conf.js\",\"test:integration:native\":\"karma start karma/integration.conf.js\",\"test:unit\":\"istanbul cover node_modules/mocha/bin/_mocha -- ./test/unit/index.js\"},\"version\":\"4.1.3\"}");
+module.exports = JSON.parse("{\"_args\":[[\"@twilio/webrtc@4.1.3\",\"/Users/mbattle/Sites/laravel-video-conference-app\"]],\"_from\":\"@twilio/webrtc@4.1.3\",\"_id\":\"@twilio/webrtc@4.1.3\",\"_inBundle\":false,\"_integrity\":\"sha512-0KjCrrpczoWQTO5RSBg+ZCDvrlgjBLhjPYN9SKstlIsOnEgtg6H1EsUt6CP7FFWLh9J3iQNuclC1gVib1PQpKw==\",\"_location\":\"/@twilio/webrtc\",\"_phantomChildren\":{},\"_requested\":{\"type\":\"version\",\"registry\":true,\"raw\":\"@twilio/webrtc@4.1.3\",\"name\":\"@twilio/webrtc\",\"escapedName\":\"@twilio%2fwebrtc\",\"scope\":\"@twilio\",\"rawSpec\":\"4.1.3\",\"saveSpec\":null,\"fetchSpec\":\"4.1.3\"},\"_requiredBy\":[\"/twilio-video\"],\"_resolved\":\"https://registry.npmjs.org/@twilio/webrtc/-/webrtc-4.1.3.tgz\",\"_spec\":\"4.1.3\",\"_where\":\"/Users/mbattle/Sites/laravel-video-conference-app\",\"author\":{\"name\":\"Manjesh Malavalli\",\"email\":\"mmalavalli@twilio.com\"},\"bugs\":{\"url\":\"https://github.com/twilio/twilio-webrtc.js/issues\"},\"contributors\":[{\"name\":\"Mark Roberts\",\"email\":\"mroberts@twilio.com\"},{\"name\":\"Ryan Rowland\",\"email\":\"rrowland@twilio.com\"}],\"description\":\"WebRTC-related APIs and shims used by twilio-video.js\",\"devDependencies\":{\"browserify\":\"^14.4.0\",\"electron\":\"^5.0.0\",\"envify\":\"^4.1.0\",\"eslint\":\"^4.4.1\",\"istanbul\":\"^0.4.5\",\"karma\":\"^1.7.0\",\"karma-browserify\":\"^5.1.1\",\"karma-chrome-launcher\":\"^2.2.0\",\"karma-electron\":\"^6.1.0\",\"karma-firefox-launcher\":\"^1.0.1\",\"karma-mocha\":\"^1.3.0\",\"karma-safari-launcher\":\"~0.1\",\"karma-spec-reporter\":\"0.0.31\",\"mocha\":\"^3.5.0\",\"npm-run-all\":\"^4.0.2\",\"release-tool\":\"^0.2.2\",\"rimraf\":\"^2.6.1\",\"travis-multirunner\":\"^4.2.3\",\"watchify\":\"^3.9.0\",\"webrtc-adapter\":\"^6.4.8\"},\"homepage\":\"https://github.com/twilio/twilio-webrtc.js#readme\",\"keywords\":[\"shim\",\"twilio\",\"video\",\"webrtc\"],\"license\":\"BSD-3-Clause\",\"main\":\"./lib/index.js\",\"name\":\"@twilio/webrtc\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/twilio/twilio-webrtc.js.git\"},\"scripts\":{\"build\":\"npm-run-all clean lint test\",\"clean\":\"rimraf coverage\",\"lint\":\"eslint ./lib\",\"test\":\"npm-run-all test:*\",\"test:integration\":\"npm-run-all test:integration:*\",\"test:integration:adapter\":\"karma start karma/integration.adapter.conf.js\",\"test:integration:native\":\"karma start karma/integration.conf.js\",\"test:unit\":\"istanbul cover node_modules/mocha/bin/_mocha -- ./test/unit/index.js\"},\"version\":\"4.1.3\"}");
 
 /***/ }),
 
@@ -3284,6 +3284,7 @@ module.exports = __webpack_require__(/*! ./lib/axios */ "./node_modules/axios/li
 
 var utils = __webpack_require__(/*! ./../utils */ "./node_modules/axios/lib/utils.js");
 var settle = __webpack_require__(/*! ./../core/settle */ "./node_modules/axios/lib/core/settle.js");
+var cookies = __webpack_require__(/*! ./../helpers/cookies */ "./node_modules/axios/lib/helpers/cookies.js");
 var buildURL = __webpack_require__(/*! ./../helpers/buildURL */ "./node_modules/axios/lib/helpers/buildURL.js");
 var buildFullPath = __webpack_require__(/*! ../core/buildFullPath */ "./node_modules/axios/lib/core/buildFullPath.js");
 var parseHeaders = __webpack_require__(/*! ./../helpers/parseHeaders */ "./node_modules/axios/lib/helpers/parseHeaders.js");
@@ -3304,7 +3305,7 @@ module.exports = function xhrAdapter(config) {
     // HTTP basic authentication
     if (config.auth) {
       var username = config.auth.username || '';
-      var password = config.auth.password || '';
+      var password = config.auth.password ? unescape(encodeURIComponent(config.auth.password)) : '';
       requestHeaders.Authorization = 'Basic ' + btoa(username + ':' + password);
     }
 
@@ -3385,8 +3386,6 @@ module.exports = function xhrAdapter(config) {
     // This is only done if running in a standard browser environment.
     // Specifically not if we're in a web worker, or react-native.
     if (utils.isStandardBrowserEnv()) {
-      var cookies = __webpack_require__(/*! ./../helpers/cookies */ "./node_modules/axios/lib/helpers/cookies.js");
-
       // Add xsrf header
       var xsrfValue = (config.withCredentials || isURLSameOrigin(fullPath)) && config.xsrfCookieName ?
         cookies.read(config.xsrfCookieName) :
@@ -3452,7 +3451,7 @@ module.exports = function xhrAdapter(config) {
       });
     }
 
-    if (requestData === undefined) {
+    if (!requestData) {
       requestData = null;
     }
 
@@ -3520,6 +3519,9 @@ axios.all = function all(promises) {
   return Promise.all(promises);
 };
 axios.spread = __webpack_require__(/*! ./helpers/spread */ "./node_modules/axios/lib/helpers/spread.js");
+
+// Expose isAxiosError
+axios.isAxiosError = __webpack_require__(/*! ./helpers/isAxiosError */ "./node_modules/axios/lib/helpers/isAxiosError.js");
 
 module.exports = axios;
 
@@ -3729,9 +3731,10 @@ Axios.prototype.getUri = function getUri(config) {
 utils.forEach(['delete', 'get', 'head', 'options'], function forEachMethodNoData(method) {
   /*eslint func-names:0*/
   Axios.prototype[method] = function(url, config) {
-    return this.request(utils.merge(config || {}, {
+    return this.request(mergeConfig(config || {}, {
       method: method,
-      url: url
+      url: url,
+      data: (config || {}).data
     }));
   };
 });
@@ -3739,7 +3742,7 @@ utils.forEach(['delete', 'get', 'head', 'options'], function forEachMethodNoData
 utils.forEach(['post', 'put', 'patch'], function forEachMethodWithData(method) {
   /*eslint func-names:0*/
   Axios.prototype[method] = function(url, data, config) {
-    return this.request(utils.merge(config || {}, {
+    return this.request(mergeConfig(config || {}, {
       method: method,
       url: url,
       data: data
@@ -3999,7 +4002,7 @@ module.exports = function enhanceError(error, config, code, request, response) {
   error.response = response;
   error.isAxiosError = true;
 
-  error.toJSON = function() {
+  error.toJSON = function toJSON() {
     return {
       // Standard
       message: this.message,
@@ -4048,59 +4051,73 @@ module.exports = function mergeConfig(config1, config2) {
   config2 = config2 || {};
   var config = {};
 
-  var valueFromConfig2Keys = ['url', 'method', 'params', 'data'];
-  var mergeDeepPropertiesKeys = ['headers', 'auth', 'proxy'];
+  var valueFromConfig2Keys = ['url', 'method', 'data'];
+  var mergeDeepPropertiesKeys = ['headers', 'auth', 'proxy', 'params'];
   var defaultToConfig2Keys = [
-    'baseURL', 'url', 'transformRequest', 'transformResponse', 'paramsSerializer',
-    'timeout', 'withCredentials', 'adapter', 'responseType', 'xsrfCookieName',
-    'xsrfHeaderName', 'onUploadProgress', 'onDownloadProgress',
-    'maxContentLength', 'validateStatus', 'maxRedirects', 'httpAgent',
-    'httpsAgent', 'cancelToken', 'socketPath'
+    'baseURL', 'transformRequest', 'transformResponse', 'paramsSerializer',
+    'timeout', 'timeoutMessage', 'withCredentials', 'adapter', 'responseType', 'xsrfCookieName',
+    'xsrfHeaderName', 'onUploadProgress', 'onDownloadProgress', 'decompress',
+    'maxContentLength', 'maxBodyLength', 'maxRedirects', 'transport', 'httpAgent',
+    'httpsAgent', 'cancelToken', 'socketPath', 'responseEncoding'
   ];
+  var directMergeKeys = ['validateStatus'];
+
+  function getMergedValue(target, source) {
+    if (utils.isPlainObject(target) && utils.isPlainObject(source)) {
+      return utils.merge(target, source);
+    } else if (utils.isPlainObject(source)) {
+      return utils.merge({}, source);
+    } else if (utils.isArray(source)) {
+      return source.slice();
+    }
+    return source;
+  }
+
+  function mergeDeepProperties(prop) {
+    if (!utils.isUndefined(config2[prop])) {
+      config[prop] = getMergedValue(config1[prop], config2[prop]);
+    } else if (!utils.isUndefined(config1[prop])) {
+      config[prop] = getMergedValue(undefined, config1[prop]);
+    }
+  }
 
   utils.forEach(valueFromConfig2Keys, function valueFromConfig2(prop) {
-    if (typeof config2[prop] !== 'undefined') {
-      config[prop] = config2[prop];
+    if (!utils.isUndefined(config2[prop])) {
+      config[prop] = getMergedValue(undefined, config2[prop]);
     }
   });
 
-  utils.forEach(mergeDeepPropertiesKeys, function mergeDeepProperties(prop) {
-    if (utils.isObject(config2[prop])) {
-      config[prop] = utils.deepMerge(config1[prop], config2[prop]);
-    } else if (typeof config2[prop] !== 'undefined') {
-      config[prop] = config2[prop];
-    } else if (utils.isObject(config1[prop])) {
-      config[prop] = utils.deepMerge(config1[prop]);
-    } else if (typeof config1[prop] !== 'undefined') {
-      config[prop] = config1[prop];
-    }
-  });
+  utils.forEach(mergeDeepPropertiesKeys, mergeDeepProperties);
 
   utils.forEach(defaultToConfig2Keys, function defaultToConfig2(prop) {
-    if (typeof config2[prop] !== 'undefined') {
-      config[prop] = config2[prop];
-    } else if (typeof config1[prop] !== 'undefined') {
-      config[prop] = config1[prop];
+    if (!utils.isUndefined(config2[prop])) {
+      config[prop] = getMergedValue(undefined, config2[prop]);
+    } else if (!utils.isUndefined(config1[prop])) {
+      config[prop] = getMergedValue(undefined, config1[prop]);
+    }
+  });
+
+  utils.forEach(directMergeKeys, function merge(prop) {
+    if (prop in config2) {
+      config[prop] = getMergedValue(config1[prop], config2[prop]);
+    } else if (prop in config1) {
+      config[prop] = getMergedValue(undefined, config1[prop]);
     }
   });
 
   var axiosKeys = valueFromConfig2Keys
     .concat(mergeDeepPropertiesKeys)
-    .concat(defaultToConfig2Keys);
+    .concat(defaultToConfig2Keys)
+    .concat(directMergeKeys);
 
   var otherKeys = Object
-    .keys(config2)
+    .keys(config1)
+    .concat(Object.keys(config2))
     .filter(function filterAxiosKeys(key) {
       return axiosKeys.indexOf(key) === -1;
     });
 
-  utils.forEach(otherKeys, function otherKeysDefaultToConfig2(prop) {
-    if (typeof config2[prop] !== 'undefined') {
-      config[prop] = config2[prop];
-    } else if (typeof config1[prop] !== 'undefined') {
-      config[prop] = config1[prop];
-    }
-  });
+  utils.forEach(otherKeys, mergeDeepProperties);
 
   return config;
 };
@@ -4129,7 +4146,7 @@ var createError = __webpack_require__(/*! ./createError */ "./node_modules/axios
  */
 module.exports = function settle(resolve, reject, response) {
   var validateStatus = response.config.validateStatus;
-  if (!validateStatus || validateStatus(response.status)) {
+  if (!response.status || !validateStatus || validateStatus(response.status)) {
     resolve(response);
   } else {
     reject(createError(
@@ -4261,6 +4278,7 @@ var defaults = {
   xsrfHeaderName: 'X-XSRF-TOKEN',
 
   maxContentLength: -1,
+  maxBodyLength: -1,
 
   validateStatus: function validateStatus(status) {
     return status >= 200 && status < 300;
@@ -4324,7 +4342,6 @@ var utils = __webpack_require__(/*! ./../utils */ "./node_modules/axios/lib/util
 
 function encode(val) {
   return encodeURIComponent(val).
-    replace(/%40/gi, '@').
     replace(/%3A/gi, ':').
     replace(/%24/g, '$').
     replace(/%2C/gi, ',').
@@ -4505,6 +4522,29 @@ module.exports = function isAbsoluteURL(url) {
   // RFC 3986 defines scheme name as a sequence of characters beginning with a letter and followed
   // by any combination of letters, digits, plus, period, or hyphen.
   return /^([a-z][a-z\d\+\-\.]*:)?\/\//i.test(url);
+};
+
+
+/***/ }),
+
+/***/ "./node_modules/axios/lib/helpers/isAxiosError.js":
+/*!********************************************************!*\
+  !*** ./node_modules/axios/lib/helpers/isAxiosError.js ***!
+  \********************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+/**
+ * Determines whether the payload is an error thrown by Axios
+ *
+ * @param {*} payload The value to test
+ * @returns {boolean} True if the payload is an error thrown by Axios, otherwise false
+ */
+module.exports = function isAxiosError(payload) {
+  return (typeof payload === 'object') && (payload.isAxiosError === true);
 };
 
 
@@ -4834,6 +4874,21 @@ function isObject(val) {
 }
 
 /**
+ * Determine if a value is a plain Object
+ *
+ * @param {Object} val The value to test
+ * @return {boolean} True if value is a plain Object, otherwise false
+ */
+function isPlainObject(val) {
+  if (toString.call(val) !== '[object Object]') {
+    return false;
+  }
+
+  var prototype = Object.getPrototypeOf(val);
+  return prototype === null || prototype === Object.prototype;
+}
+
+/**
  * Determine if a value is a Date
  *
  * @param {Object} val The value to test
@@ -4989,34 +5044,12 @@ function forEach(obj, fn) {
 function merge(/* obj1, obj2, obj3, ... */) {
   var result = {};
   function assignValue(val, key) {
-    if (typeof result[key] === 'object' && typeof val === 'object') {
+    if (isPlainObject(result[key]) && isPlainObject(val)) {
       result[key] = merge(result[key], val);
-    } else {
-      result[key] = val;
-    }
-  }
-
-  for (var i = 0, l = arguments.length; i < l; i++) {
-    forEach(arguments[i], assignValue);
-  }
-  return result;
-}
-
-/**
- * Function equal to merge with the difference being that no reference
- * to original objects is kept.
- *
- * @see merge
- * @param {Object} obj1 Object to merge
- * @returns {Object} Result of all merge properties
- */
-function deepMerge(/* obj1, obj2, obj3, ... */) {
-  var result = {};
-  function assignValue(val, key) {
-    if (typeof result[key] === 'object' && typeof val === 'object') {
-      result[key] = deepMerge(result[key], val);
-    } else if (typeof val === 'object') {
-      result[key] = deepMerge({}, val);
+    } else if (isPlainObject(val)) {
+      result[key] = merge({}, val);
+    } else if (isArray(val)) {
+      result[key] = val.slice();
     } else {
       result[key] = val;
     }
@@ -5047,6 +5080,19 @@ function extend(a, b, thisArg) {
   return a;
 }
 
+/**
+ * Remove byte order marker. This catches EF BB BF (the UTF-8 BOM)
+ *
+ * @param {string} content with BOM
+ * @return {string} content value without BOM
+ */
+function stripBOM(content) {
+  if (content.charCodeAt(0) === 0xFEFF) {
+    content = content.slice(1);
+  }
+  return content;
+}
+
 module.exports = {
   isArray: isArray,
   isArrayBuffer: isArrayBuffer,
@@ -5056,6 +5102,7 @@ module.exports = {
   isString: isString,
   isNumber: isNumber,
   isObject: isObject,
+  isPlainObject: isPlainObject,
   isUndefined: isUndefined,
   isDate: isDate,
   isFile: isFile,
@@ -5066,9 +5113,9 @@ module.exports = {
   isStandardBrowserEnv: isStandardBrowserEnv,
   forEach: forEach,
   merge: merge,
-  deepMerge: deepMerge,
   extend: extend,
-  trim: trim
+  trim: trim,
+  stripBOM: stripBOM
 };
 
 
@@ -21077,7 +21124,7 @@ return jQuery;
   var undefined;
 
   /** Used as the semantic version number. */
-  var VERSION = '4.17.15';
+  var VERSION = '4.17.19';
 
   /** Used as the size to enable large array optimizations. */
   var LARGE_ARRAY_SIZE = 200;
@@ -24784,8 +24831,21 @@ return jQuery;
      * @returns {Array} Returns the new sorted array.
      */
     function baseOrderBy(collection, iteratees, orders) {
+      if (iteratees.length) {
+        iteratees = arrayMap(iteratees, function(iteratee) {
+          if (isArray(iteratee)) {
+            return function(value) {
+              return baseGet(value, iteratee.length === 1 ? iteratee[0] : iteratee);
+            }
+          }
+          return iteratee;
+        });
+      } else {
+        iteratees = [identity];
+      }
+
       var index = -1;
-      iteratees = arrayMap(iteratees.length ? iteratees : [identity], baseUnary(getIteratee()));
+      iteratees = arrayMap(iteratees, baseUnary(getIteratee()));
 
       var result = baseMap(collection, function(value, key, collection) {
         var criteria = arrayMap(iteratees, function(iteratee) {
@@ -25042,6 +25102,10 @@ return jQuery;
         var key = toKey(path[index]),
             newValue = value;
 
+        if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+          return object;
+        }
+
         if (index != lastIndex) {
           var objValue = nested[key];
           newValue = customizer ? customizer(objValue, key, nested) : undefined;
@@ -25194,11 +25258,14 @@ return jQuery;
      *  into `array`.
      */
     function baseSortedIndexBy(array, value, iteratee, retHighest) {
-      value = iteratee(value);
-
       var low = 0,
-          high = array == null ? 0 : array.length,
-          valIsNaN = value !== value,
+          high = array == null ? 0 : array.length;
+      if (high === 0) {
+        return 0;
+      }
+
+      value = iteratee(value);
+      var valIsNaN = value !== value,
           valIsNull = value === null,
           valIsSymbol = isSymbol(value),
           valIsUndefined = value === undefined;
@@ -26683,10 +26750,11 @@ return jQuery;
       if (arrLength != othLength && !(isPartial && othLength > arrLength)) {
         return false;
       }
-      // Assume cyclic values are equal.
-      var stacked = stack.get(array);
-      if (stacked && stack.get(other)) {
-        return stacked == other;
+      // Check that cyclic values are equal.
+      var arrStacked = stack.get(array);
+      var othStacked = stack.get(other);
+      if (arrStacked && othStacked) {
+        return arrStacked == other && othStacked == array;
       }
       var index = -1,
           result = true,
@@ -26848,10 +26916,11 @@ return jQuery;
           return false;
         }
       }
-      // Assume cyclic values are equal.
-      var stacked = stack.get(object);
-      if (stacked && stack.get(other)) {
-        return stacked == other;
+      // Check that cyclic values are equal.
+      var objStacked = stack.get(object);
+      var othStacked = stack.get(other);
+      if (objStacked && othStacked) {
+        return objStacked == other && othStacked == object;
       }
       var result = true;
       stack.set(object, other);
@@ -30232,6 +30301,10 @@ return jQuery;
      * // The `_.property` iteratee shorthand.
      * _.filter(users, 'active');
      * // => objects for ['barney']
+     *
+     * // Combining several predicates using `_.overEvery` or `_.overSome`.
+     * _.filter(users, _.overSome([{ 'age': 36 }, ['age', 40]]));
+     * // => objects for ['fred', 'barney']
      */
     function filter(collection, predicate) {
       var func = isArray(collection) ? arrayFilter : baseFilter;
@@ -30981,15 +31054,15 @@ return jQuery;
      * var users = [
      *   { 'user': 'fred',   'age': 48 },
      *   { 'user': 'barney', 'age': 36 },
-     *   { 'user': 'fred',   'age': 40 },
+     *   { 'user': 'fred',   'age': 30 },
      *   { 'user': 'barney', 'age': 34 }
      * ];
      *
      * _.sortBy(users, [function(o) { return o.user; }]);
-     * // => objects for [['barney', 36], ['barney', 34], ['fred', 48], ['fred', 40]]
+     * // => objects for [['barney', 36], ['barney', 34], ['fred', 48], ['fred', 30]]
      *
      * _.sortBy(users, ['user', 'age']);
-     * // => objects for [['barney', 34], ['barney', 36], ['fred', 40], ['fred', 48]]
+     * // => objects for [['barney', 34], ['barney', 36], ['fred', 30], ['fred', 48]]
      */
     var sortBy = baseRest(function(collection, iteratees) {
       if (collection == null) {
@@ -35864,11 +35937,11 @@ return jQuery;
 
       // Use a sourceURL for easier debugging.
       // The sourceURL gets injected into the source that's eval-ed, so be careful
-      // with lookup (in case of e.g. prototype pollution), and strip newlines if any.
-      // A newline wouldn't be a valid sourceURL anyway, and it'd enable code injection.
+      // to normalize all kinds of whitespace, so e.g. newlines (and unicode versions of it) can't sneak in
+      // and escape the comment, thus injecting code that gets evaled.
       var sourceURL = '//# sourceURL=' +
         (hasOwnProperty.call(options, 'sourceURL')
-          ? (options.sourceURL + '').replace(/[\r\n]/g, ' ')
+          ? (options.sourceURL + '').replace(/\s/g, ' ')
           : ('lodash.templateSources[' + (++templateCounter) + ']')
         ) + '\n';
 
@@ -35901,8 +35974,6 @@ return jQuery;
 
       // If `variable` is not specified wrap a with-statement around the generated
       // code to add the data object to the top of the scope chain.
-      // Like with sourceURL, we take care to not check the option's prototype,
-      // as this configuration is a code injection vector.
       var variable = hasOwnProperty.call(options, 'variable') && options.variable;
       if (!variable) {
         source = 'with (obj) {\n' + source + '\n}\n';
@@ -36609,6 +36680,9 @@ return jQuery;
      * values against any array or object value, respectively. See `_.isEqual`
      * for a list of supported value comparisons.
      *
+     * **Note:** Multiple values can be checked by combining several matchers
+     * using `_.overSome`
+     *
      * @static
      * @memberOf _
      * @since 3.0.0
@@ -36624,6 +36698,10 @@ return jQuery;
      *
      * _.filter(objects, _.matches({ 'a': 4, 'c': 6 }));
      * // => [{ 'a': 4, 'b': 5, 'c': 6 }]
+     *
+     * // Checking for several possible values
+     * _.filter(users, _.overSome([_.matches({ 'a': 1 }), _.matches({ 'a': 4 })]));
+     * // => [{ 'a': 1, 'b': 2, 'c': 3 }, { 'a': 4, 'b': 5, 'c': 6 }]
      */
     function matches(source) {
       return baseMatches(baseClone(source, CLONE_DEEP_FLAG));
@@ -36637,6 +36715,9 @@ return jQuery;
      * **Note:** Partial comparisons will match empty array and empty object
      * `srcValue` values against any array or object value, respectively. See
      * `_.isEqual` for a list of supported value comparisons.
+     *
+     * **Note:** Multiple values can be checked by combining several matchers
+     * using `_.overSome`
      *
      * @static
      * @memberOf _
@@ -36654,6 +36735,10 @@ return jQuery;
      *
      * _.find(objects, _.matchesProperty('a', 4));
      * // => { 'a': 4, 'b': 5, 'c': 6 }
+     *
+     * // Checking for several possible values
+     * _.filter(users, _.overSome([_.matchesProperty('a', 1), _.matchesProperty('a', 4)]));
+     * // => [{ 'a': 1, 'b': 2, 'c': 3 }, { 'a': 4, 'b': 5, 'c': 6 }]
      */
     function matchesProperty(path, srcValue) {
       return baseMatchesProperty(path, baseClone(srcValue, CLONE_DEEP_FLAG));
@@ -36877,6 +36962,10 @@ return jQuery;
      * Creates a function that checks if **all** of the `predicates` return
      * truthy when invoked with the arguments it receives.
      *
+     * Following shorthands are possible for providing predicates.
+     * Pass an `Object` and it will be used as an parameter for `_.matches` to create the predicate.
+     * Pass an `Array` of parameters for `_.matchesProperty` and the predicate will be created using them.
+     *
      * @static
      * @memberOf _
      * @since 4.0.0
@@ -36903,6 +36992,10 @@ return jQuery;
      * Creates a function that checks if **any** of the `predicates` return
      * truthy when invoked with the arguments it receives.
      *
+     * Following shorthands are possible for providing predicates.
+     * Pass an `Object` and it will be used as an parameter for `_.matches` to create the predicate.
+     * Pass an `Array` of parameters for `_.matchesProperty` and the predicate will be created using them.
+     *
      * @static
      * @memberOf _
      * @since 4.0.0
@@ -36922,6 +37015,9 @@ return jQuery;
      *
      * func(NaN);
      * // => false
+     *
+     * var matchesFunc = _.overSome([{ 'a': 1 }, { 'a': 2 }])
+     * var matchesPropertyFunc = _.overSome([['a', 1], ['a', 2]])
      */
     var overSome = createOver(arraySome);
 
@@ -65328,7 +65424,7 @@ module.exports = workaround;
 /*! exports provided: _args, _from, _id, _inBundle, _integrity, _location, _phantomChildren, _requested, _requiredBy, _resolved, _spec, _where, author, browser, bugs, contributors, dependencies, description, devDependencies, engines, homepage, keywords, license, main, name, repository, scripts, title, version, default */
 /***/ (function(module) {
 
-module.exports = JSON.parse("{\"_args\":[[\"twilio-video@2.0.0\",\"/Users/mbattle/Sites/mbattle-laravel-video-chat-room\"]],\"_from\":\"twilio-video@2.0.0\",\"_id\":\"twilio-video@2.0.0\",\"_inBundle\":false,\"_integrity\":\"sha512-805DBxcuL1JIP+XMCd2IAOLb4KpbiS8bjW3WvyuhbNUOlTVxxiydVDUCkhAIgOPeYSRWxdcxc6RXHK9oTfJviA==\",\"_location\":\"/twilio-video\",\"_phantomChildren\":{\"async-limiter\":\"1.0.1\",\"safe-buffer\":\"5.1.2\",\"ultron\":\"1.1.1\"},\"_requested\":{\"type\":\"version\",\"registry\":true,\"raw\":\"twilio-video@2.0.0\",\"name\":\"twilio-video\",\"escapedName\":\"twilio-video\",\"rawSpec\":\"2.0.0\",\"saveSpec\":null,\"fetchSpec\":\"2.0.0\"},\"_requiredBy\":[\"/\"],\"_resolved\":\"https://registry.npmjs.org/twilio-video/-/twilio-video-2.0.0.tgz\",\"_spec\":\"2.0.0\",\"_where\":\"/Users/mbattle/Sites/mbattle-laravel-video-chat-room\",\"author\":{\"name\":\"Mark Andrus Roberts\",\"email\":\"mroberts@twilio.com\"},\"browser\":{\"ws\":\"./src/ws.js\",\"xmlhttprequest\":\"./src/xmlhttprequest.js\"},\"bugs\":{\"url\":\"https://github.com/twilio/twilio-video.js/issues\"},\"contributors\":[{\"name\":\"Ryan Rowland\",\"email\":\"rrowland@twilio.com\"},{\"name\":\"Manjesh Malavalli\",\"email\":\"mmalavalli@twilio.com\"},{\"name\":\"Makarand Patwardhan\",\"email\":\"mpatwardhan@twilio.com\"}],\"dependencies\":{\"@twilio/webrtc\":\"4.1.3\",\"ws\":\"^3.3.1\",\"xmlhttprequest\":\"^1.8.0\"},\"description\":\"Twilio Video JavaScript library\",\"devDependencies\":{\"@types/express\":\"^4.11.0\",\"@types/node\":\"^8.5.1\",\"@types/selenium-webdriver\":\"^3.0.8\",\"@types/ws\":\"^3.2.1\",\"babel-cli\":\"^6.26.0\",\"babel-preset-es2015\":\"^6.24.1\",\"browserify\":\"^14.3.0\",\"cheerio\":\"^0.22.0\",\"chromedriver\":\"2.28.0\",\"cors\":\"^2.8.5\",\"electron\":\"^5.0.1\",\"envify\":\"^4.0.0\",\"eslint\":\"^6.2.1\",\"eslint-config-standard\":\"^14.0.0\",\"eslint-plugin-import\":\"^2.18.2\",\"eslint-plugin-node\":\"^9.1.0\",\"eslint-plugin-promise\":\"^4.2.1\",\"eslint-plugin-standard\":\"^4.0.1\",\"express\":\"^4.16.2\",\"geckodriver\":\"1.4.0\",\"ink-docstrap\":\"^1.3.2\",\"inquirer\":\"^7.0.0\",\"is-docker\":\"^2.0.0\",\"istanbul\":\"^0.4.5\",\"jsdoc\":\"^3.5.5\",\"json-loader\":\"^0.5.7\",\"karma\":\"^1.6.0\",\"karma-browserify\":\"^5.1.1\",\"karma-chrome-launcher\":\"^2.0.0\",\"karma-electron\":\"^6.1.0\",\"karma-firefox-launcher\":\"^1.0.1\",\"karma-htmlfile-reporter\":\"^0.3.8\",\"karma-junit-reporter\":\"^1.2.0\",\"karma-mocha\":\"^1.3.0\",\"karma-safari-launcher\":\"^1.0.0\",\"karma-spec-reporter\":\"0.0.32\",\"mocha\":\"^3.2.0\",\"npm-run-all\":\"^4.0.2\",\"puppeteer\":\"^1.11.0\",\"release-tool\":\"^0.2.2\",\"requirejs\":\"^2.3.3\",\"rimraf\":\"^2.6.1\",\"selenium-webdriver\":\"3.3.0\",\"simple-git\":\"^1.126.0\",\"sinon\":\"^4.0.1\",\"travis-multirunner\":\"^4.0.0\",\"ts-node\":\"4.0.1\",\"tslint\":\"5.8.0\",\"twilio\":\"^2.11.1\",\"typescript\":\"2.6.2\",\"uglify-js\":\"^2.8.22\",\"vinyl-fs\":\"^2.4.4\",\"vinyl-source-stream\":\"^1.1.0\",\"watchify\":\"^3.11.1\",\"webrtc-adapter\":\"^4.1.1\"},\"engines\":{\"node\":\">=0.12\"},\"homepage\":\"https://twilio.com\",\"keywords\":[\"twilio\",\"webrtc\",\"library\",\"javascript\",\"video\",\"rooms\"],\"license\":\"BSD-3-Clause\",\"main\":\"./es5/index.js\",\"name\":\"twilio-video\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/twilio/twilio-video.js.git\"},\"scripts\":{\"build\":\"npm-run-all clean lint docs cover test:integration build:es5 build:js build:min.js test:umd\",\"build:docker\":\"npm-run-all clean lint docs cover test:integration:travis build:es5 build:js build:min.js\",\"build:es5\":\"rimraf ./es5 && babel lib -d es5\",\"build:js\":\"node ./scripts/build.js ./src/twilio-video.js ./LICENSE.md ./dist/twilio-video.js\",\"build:min.js\":\"uglifyjs ./dist/twilio-video.js -o ./dist/twilio-video.min.js --comments \\\"/^! twilio-video.js/\\\" -b beautify=false,ascii_only=true\",\"build:quick\":\"npm-run-all clean lint docs build:es5 build:js build:min.js\",\"build:travis\":\"npm-run-all clean lint docs cover build:es5 build:js build:min.js test:umd test:framework\",\"clean\":\"rimraf ./coverage ./es5 ./dist\",\"cover\":\"istanbul cover node_modules/mocha/bin/_mocha -- ./test/unit/index.js\",\"docs\":\"node ./scripts/docs.js ./dist/docs\",\"lint\":\"eslint ./lib ./test/*.js ./docker/**/*.js ./test/framework/*.js ./test/lib/*.js ./test/integration/** ./test/unit/**\",\"test\":\"npm-run-all test:unit test:integration\",\"test:crossbrowser\":\"npm-run-all test:crossbrowser:*\",\"test:crossbrowser:build\":\"npm-run-all test:crossbrowser:build:*\",\"test:crossbrowser:build:browser\":\"cd ./test/crossbrowser && browserify lib/crossbrowser/src/browser/index.js > src/browser/index.js\",\"test:crossbrowser:build:clean\":\"rimraf ./test/crossbrowser/lib ./test/crossbrowser/src/browser/index.js\",\"test:crossbrowser:build:lint\":\"cd ./test/crossbrowser && tslint --project tsconfig.json\",\"test:crossbrowser:build:tsc\":\"cd ./test/crossbrowser && tsc\",\"test:crossbrowser:test\":\"cd ./test/crossbrowser && mocha --compilers ts:ts-node/register test/integration/spec/**/*.ts\",\"test:framework\":\"npm-run-all test:framework:angular test:framework:no-framework test:framework:react\",\"test:framework:angular\":\"npm-run-all test:framework:angular:*\",\"test:framework:angular:install\":\"cd ./test/framework/twilio-video-angular && rimraf ./node_modules && npm install\",\"test:framework:angular:run\":\"mocha ./test/framework/twilio-video-angular.js\",\"test:framework:no-framework\":\"npm-run-all test:framework:no-framework:*\",\"test:framework:no-framework:run\":\"mocha ./test/framework/twilio-video-no-framework.js\",\"test:framework:react\":\"npm-run-all test:framework:react:*\",\"test:framework:react:build\":\"cd ./test/framework/twilio-video-react && npm run build\",\"test:framework:react:install\":\"cd ./test/framework/twilio-video-react && rimraf ./node_modules && npm install\",\"test:framework:react:run\":\"mocha ./test/framework/twilio-video-react.js\",\"test:framework:react:test\":\"node ./scripts/framework.js twilio-video-react\",\"test:integration\":\"node ./scripts/karma.js karma/integration.conf.js\",\"test:integration:adapter\":\"node ./scripts/karma.js karma/integration.adapter.conf.js\",\"test:integration:travis\":\"node ./scripts/integration.js\",\"test:sdkdriver\":\"npm-run-all test:sdkdriver:*\",\"test:sdkdriver:build\":\"npm-run-all test:sdkdriver:build:*\",\"test:sdkdriver:build:clean\":\"rimraf ./test/lib/sdkdriver/lib ./test/lib/sdkdriver/test/integration/browser/index.js\",\"test:sdkdriver:build:lint\":\"cd ./test/lib/sdkdriver && tslint --project tsconfig.json\",\"test:sdkdriver:build:tsc\":\"cd ./test/lib/sdkdriver && tsc --rootDir src\",\"test:sdkdriver:test\":\"npm-run-all test:sdkdriver:test:*\",\"test:sdkdriver:test:integration\":\"npm-run-all test:sdkdriver:test:integration:*\",\"test:sdkdriver:test:integration:browser\":\"cd ./test/lib/sdkdriver/test/integration && browserify browser/browser.js > browser/index.js\",\"test:sdkdriver:test:integration:run\":\"cd ./test/lib/sdkdriver && mocha --compilers ts:ts-node/register test/integration/spec/**/*.ts\",\"test:sdkdriver:test:unit\":\"cd ./test/lib/sdkdriver && mocha --compilers ts:ts-node/register test/unit/spec/**/*.ts\",\"test:umd\":\"mocha ./test/umd/index.js\",\"test:unit\":\"mocha ./test/unit/index.js\"},\"title\":\"Twilio Video\",\"version\":\"2.0.0\"}");
+module.exports = JSON.parse("{\"_args\":[[\"twilio-video@2.0.0\",\"/Users/mbattle/Sites/laravel-video-conference-app\"]],\"_from\":\"twilio-video@2.0.0\",\"_id\":\"twilio-video@2.0.0\",\"_inBundle\":false,\"_integrity\":\"sha512-805DBxcuL1JIP+XMCd2IAOLb4KpbiS8bjW3WvyuhbNUOlTVxxiydVDUCkhAIgOPeYSRWxdcxc6RXHK9oTfJviA==\",\"_location\":\"/twilio-video\",\"_phantomChildren\":{\"async-limiter\":\"1.0.1\",\"safe-buffer\":\"5.1.2\",\"ultron\":\"1.1.1\"},\"_requested\":{\"type\":\"version\",\"registry\":true,\"raw\":\"twilio-video@2.0.0\",\"name\":\"twilio-video\",\"escapedName\":\"twilio-video\",\"rawSpec\":\"2.0.0\",\"saveSpec\":null,\"fetchSpec\":\"2.0.0\"},\"_requiredBy\":[\"/\"],\"_resolved\":\"https://registry.npmjs.org/twilio-video/-/twilio-video-2.0.0.tgz\",\"_spec\":\"2.0.0\",\"_where\":\"/Users/mbattle/Sites/laravel-video-conference-app\",\"author\":{\"name\":\"Mark Andrus Roberts\",\"email\":\"mroberts@twilio.com\"},\"browser\":{\"ws\":\"./src/ws.js\",\"xmlhttprequest\":\"./src/xmlhttprequest.js\"},\"bugs\":{\"url\":\"https://github.com/twilio/twilio-video.js/issues\"},\"contributors\":[{\"name\":\"Ryan Rowland\",\"email\":\"rrowland@twilio.com\"},{\"name\":\"Manjesh Malavalli\",\"email\":\"mmalavalli@twilio.com\"},{\"name\":\"Makarand Patwardhan\",\"email\":\"mpatwardhan@twilio.com\"}],\"dependencies\":{\"@twilio/webrtc\":\"4.1.3\",\"ws\":\"^3.3.1\",\"xmlhttprequest\":\"^1.8.0\"},\"description\":\"Twilio Video JavaScript library\",\"devDependencies\":{\"@types/express\":\"^4.11.0\",\"@types/node\":\"^8.5.1\",\"@types/selenium-webdriver\":\"^3.0.8\",\"@types/ws\":\"^3.2.1\",\"babel-cli\":\"^6.26.0\",\"babel-preset-es2015\":\"^6.24.1\",\"browserify\":\"^14.3.0\",\"cheerio\":\"^0.22.0\",\"chromedriver\":\"2.28.0\",\"cors\":\"^2.8.5\",\"electron\":\"^5.0.1\",\"envify\":\"^4.0.0\",\"eslint\":\"^6.2.1\",\"eslint-config-standard\":\"^14.0.0\",\"eslint-plugin-import\":\"^2.18.2\",\"eslint-plugin-node\":\"^9.1.0\",\"eslint-plugin-promise\":\"^4.2.1\",\"eslint-plugin-standard\":\"^4.0.1\",\"express\":\"^4.16.2\",\"geckodriver\":\"1.4.0\",\"ink-docstrap\":\"^1.3.2\",\"inquirer\":\"^7.0.0\",\"is-docker\":\"^2.0.0\",\"istanbul\":\"^0.4.5\",\"jsdoc\":\"^3.5.5\",\"json-loader\":\"^0.5.7\",\"karma\":\"^1.6.0\",\"karma-browserify\":\"^5.1.1\",\"karma-chrome-launcher\":\"^2.0.0\",\"karma-electron\":\"^6.1.0\",\"karma-firefox-launcher\":\"^1.0.1\",\"karma-htmlfile-reporter\":\"^0.3.8\",\"karma-junit-reporter\":\"^1.2.0\",\"karma-mocha\":\"^1.3.0\",\"karma-safari-launcher\":\"^1.0.0\",\"karma-spec-reporter\":\"0.0.32\",\"mocha\":\"^3.2.0\",\"npm-run-all\":\"^4.0.2\",\"puppeteer\":\"^1.11.0\",\"release-tool\":\"^0.2.2\",\"requirejs\":\"^2.3.3\",\"rimraf\":\"^2.6.1\",\"selenium-webdriver\":\"3.3.0\",\"simple-git\":\"^1.126.0\",\"sinon\":\"^4.0.1\",\"travis-multirunner\":\"^4.0.0\",\"ts-node\":\"4.0.1\",\"tslint\":\"5.8.0\",\"twilio\":\"^2.11.1\",\"typescript\":\"2.6.2\",\"uglify-js\":\"^2.8.22\",\"vinyl-fs\":\"^2.4.4\",\"vinyl-source-stream\":\"^1.1.0\",\"watchify\":\"^3.11.1\",\"webrtc-adapter\":\"^4.1.1\"},\"engines\":{\"node\":\">=0.12\"},\"homepage\":\"https://twilio.com\",\"keywords\":[\"twilio\",\"webrtc\",\"library\",\"javascript\",\"video\",\"rooms\"],\"license\":\"BSD-3-Clause\",\"main\":\"./es5/index.js\",\"name\":\"twilio-video\",\"repository\":{\"type\":\"git\",\"url\":\"git+https://github.com/twilio/twilio-video.js.git\"},\"scripts\":{\"build\":\"npm-run-all clean lint docs cover test:integration build:es5 build:js build:min.js test:umd\",\"build:docker\":\"npm-run-all clean lint docs cover test:integration:travis build:es5 build:js build:min.js\",\"build:es5\":\"rimraf ./es5 && babel lib -d es5\",\"build:js\":\"node ./scripts/build.js ./src/twilio-video.js ./LICENSE.md ./dist/twilio-video.js\",\"build:min.js\":\"uglifyjs ./dist/twilio-video.js -o ./dist/twilio-video.min.js --comments \\\"/^! twilio-video.js/\\\" -b beautify=false,ascii_only=true\",\"build:quick\":\"npm-run-all clean lint docs build:es5 build:js build:min.js\",\"build:travis\":\"npm-run-all clean lint docs cover build:es5 build:js build:min.js test:umd test:framework\",\"clean\":\"rimraf ./coverage ./es5 ./dist\",\"cover\":\"istanbul cover node_modules/mocha/bin/_mocha -- ./test/unit/index.js\",\"docs\":\"node ./scripts/docs.js ./dist/docs\",\"lint\":\"eslint ./lib ./test/*.js ./docker/**/*.js ./test/framework/*.js ./test/lib/*.js ./test/integration/** ./test/unit/**\",\"test\":\"npm-run-all test:unit test:integration\",\"test:crossbrowser\":\"npm-run-all test:crossbrowser:*\",\"test:crossbrowser:build\":\"npm-run-all test:crossbrowser:build:*\",\"test:crossbrowser:build:browser\":\"cd ./test/crossbrowser && browserify lib/crossbrowser/src/browser/index.js > src/browser/index.js\",\"test:crossbrowser:build:clean\":\"rimraf ./test/crossbrowser/lib ./test/crossbrowser/src/browser/index.js\",\"test:crossbrowser:build:lint\":\"cd ./test/crossbrowser && tslint --project tsconfig.json\",\"test:crossbrowser:build:tsc\":\"cd ./test/crossbrowser && tsc\",\"test:crossbrowser:test\":\"cd ./test/crossbrowser && mocha --compilers ts:ts-node/register test/integration/spec/**/*.ts\",\"test:framework\":\"npm-run-all test:framework:angular test:framework:no-framework test:framework:react\",\"test:framework:angular\":\"npm-run-all test:framework:angular:*\",\"test:framework:angular:install\":\"cd ./test/framework/twilio-video-angular && rimraf ./node_modules && npm install\",\"test:framework:angular:run\":\"mocha ./test/framework/twilio-video-angular.js\",\"test:framework:no-framework\":\"npm-run-all test:framework:no-framework:*\",\"test:framework:no-framework:run\":\"mocha ./test/framework/twilio-video-no-framework.js\",\"test:framework:react\":\"npm-run-all test:framework:react:*\",\"test:framework:react:build\":\"cd ./test/framework/twilio-video-react && npm run build\",\"test:framework:react:install\":\"cd ./test/framework/twilio-video-react && rimraf ./node_modules && npm install\",\"test:framework:react:run\":\"mocha ./test/framework/twilio-video-react.js\",\"test:framework:react:test\":\"node ./scripts/framework.js twilio-video-react\",\"test:integration\":\"node ./scripts/karma.js karma/integration.conf.js\",\"test:integration:adapter\":\"node ./scripts/karma.js karma/integration.adapter.conf.js\",\"test:integration:travis\":\"node ./scripts/integration.js\",\"test:sdkdriver\":\"npm-run-all test:sdkdriver:*\",\"test:sdkdriver:build\":\"npm-run-all test:sdkdriver:build:*\",\"test:sdkdriver:build:clean\":\"rimraf ./test/lib/sdkdriver/lib ./test/lib/sdkdriver/test/integration/browser/index.js\",\"test:sdkdriver:build:lint\":\"cd ./test/lib/sdkdriver && tslint --project tsconfig.json\",\"test:sdkdriver:build:tsc\":\"cd ./test/lib/sdkdriver && tsc --rootDir src\",\"test:sdkdriver:test\":\"npm-run-all test:sdkdriver:test:*\",\"test:sdkdriver:test:integration\":\"npm-run-all test:sdkdriver:test:integration:*\",\"test:sdkdriver:test:integration:browser\":\"cd ./test/lib/sdkdriver/test/integration && browserify browser/browser.js > browser/index.js\",\"test:sdkdriver:test:integration:run\":\"cd ./test/lib/sdkdriver && mocha --compilers ts:ts-node/register test/integration/spec/**/*.ts\",\"test:sdkdriver:test:unit\":\"cd ./test/lib/sdkdriver && mocha --compilers ts:ts-node/register test/unit/spec/**/*.ts\",\"test:umd\":\"mocha ./test/umd/index.js\",\"test:unit\":\"mocha ./test/unit/index.js\"},\"title\":\"Twilio Video\",\"version\":\"2.0.0\"}");
 
 /***/ }),
 
@@ -78605,8 +78701,8 @@ __webpack_require__.r(__webpack_exports__);
 /*! no static exports found */
 /***/ (function(module, exports, __webpack_require__) {
 
-__webpack_require__(/*! /Users/mbattle/Sites/mbattle-laravel-video-chat-room/resources/js/app.js */"./resources/js/app.js");
-module.exports = __webpack_require__(/*! /Users/mbattle/Sites/mbattle-laravel-video-chat-room/resources/sass/app.scss */"./resources/sass/app.scss");
+__webpack_require__(/*! /Users/mbattle/Sites/laravel-video-conference-app/resources/js/app.js */"./resources/js/app.js");
+module.exports = __webpack_require__(/*! /Users/mbattle/Sites/laravel-video-conference-app/resources/sass/app.scss */"./resources/sass/app.scss");
 
 
 /***/ })
