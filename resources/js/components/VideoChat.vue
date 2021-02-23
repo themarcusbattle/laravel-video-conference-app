@@ -1,6 +1,5 @@
 <template>
     <div class="p-5">
-        <h1 class="text-2xl mb-4">Laravel Video Chat</h1>
         <div id="video-chat-window" class="grid grid-flow-row grid-cols-2 grid-rows-2 gap-4"></div>
     </div>
 </template>
@@ -31,38 +30,55 @@ export default {
                     _this.connectToRoom()
                 });
         },
-        connectToRoom : function () {
+        connectToRoom : async function () {
 
-            const { connect, createLocalVideoTrack } = require('twilio-video');
+            const _this = this
+            const { createLocalTracks, connect } = require('twilio-video');
+            
+            const tracks = await createLocalTracks();
 
-            connect( this.accessToken, { name:'cool room' }).then(room => {
+            // Display camera preview.
+            const localVideoTrack = tracks.find(track => track.kind === 'video');
+            document.body.appendChild(localVideoTrack.attach());
+
+            connect( this.accessToken, { name:'cool room', tracks }).then(room => {
                 
-                console.log(`Successfully joined a Room: ${room}`);
-                
-                const videoChatWindow = document.getElementById('video-chat-window');
+                room.participants.forEach(participantConnected);
+                room.on('participantConnected', participantConnected);
 
-                createLocalVideoTrack().then(track => {
-                    videoChatWindow.appendChild(track.attach());
-                });
+                function participantConnected(participant) {
+                    console.log('Participant "%s" connected', participant.identity);
 
-                room.on('participantConnected', participant => {
-                    console.log(`Participant "${participant.identity}" connected`);
+                    const div = document.createElement('div');
+                    div.id = participant.sid;
+                    div.innerText = participant.identity;
+
+                    participant.on('trackSubscribed', track => trackSubscribed(div, track));
+                    participant.on('trackUnsubscribed', trackUnsubscribed);
 
                     participant.tracks.forEach(publication => {
                         if (publication.isSubscribed) {
-                            const track = publication.track;
-                            videoChatWindow.appendChild(track.attach());
+                        trackSubscribed(div, publication.track);
                         }
                     });
 
-                    participant.on('trackSubscribed', track => {
-                        videoChatWindow.appendChild(track.attach());
-                    });
-                });
-            }, error => {
-                console.error(`Unable to connect to Room: ${error.message}`);
-            });
-        }
+                    document.body.appendChild(div);
+                }
+
+                function participantDisconnected(participant) {
+                    console.log('Participant "%s" disconnected', participant.identity);
+                    document.getElementById(participant.sid).remove();
+                }
+
+                function trackSubscribed(div, track) {
+                    div.appendChild(track.attach());
+                }
+
+                function trackUnsubscribed(track) {
+                    track.detach().forEach(element => element.remove());
+                }
+            })
+        },
     },
     mounted : function () {
         console.log('Video room loading...')
