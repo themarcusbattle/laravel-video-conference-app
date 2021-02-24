@@ -13,7 +13,7 @@ $ git clone git@github.com:themarcusbattle/laravel-video-conference-app.git
 Install all dependencies:
 
 ```bash
-$ cd laravel-video-chat-room && npm install && composer install
+$ cd laravel-video-conference-app && npm install && composer install
 ```
 
 Create a new `.env` file.
