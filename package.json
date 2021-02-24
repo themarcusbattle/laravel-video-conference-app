@@ -26,6 +26,7 @@
         "vue-template-compiler": "^2.6.12"
     },
     "dependencies": {
+        "tailwindcss": "^2.0.3",
         "twilio-video": "^2.12.0"
     }
 }

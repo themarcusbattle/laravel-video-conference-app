@@ -50,6 +50,9 @@ Start the application using the Laravel artisan command:
 $ php artisan serve
 ```
 
-Visit `http://127.0.0.1:8000/` and test things out! 
+Visit `http://127.0.0.1:8000/` and test things out!
 
 **NOTE:** You will only be able to use this in production under https.
+
+## Push to Production
+If you would like to host this app on your own server, I highly recommend [Amezmo](https://www.amezmo.com/r/74956eaad08d5bc2), a dedicated PHP platform with automatic deployments. Fork this repo and deploy!
