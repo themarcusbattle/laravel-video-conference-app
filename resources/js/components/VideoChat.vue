@@ -1,6 +1,7 @@
 <template>
     <div class="p-5">
-        <div id="video-chat-window" class="grid grid-flow-row grid-cols-2 grid-rows-2 gap-4"></div>
+        <div id="video-chat-window" class=""></div>
+        <div id="video-preview" class="fixed bg-gray-600 bottom-0 right-0 w-1/2 md:w-1/3 lg:w-1/4 mr-5 mb-5 sm:mr-10 sm:mb-10 overflow-hidden rounded-md shadow-xl"></div>
     </div>
 </template>
 
@@ -39,9 +40,9 @@ export default {
 
             // Display camera preview.
             const localVideoTrack = tracks.find(track => track.kind === 'video');
-            document.body.appendChild(localVideoTrack.attach());
+            document.getElementById('video-preview').appendChild(localVideoTrack.attach());
 
-            connect( this.accessToken, { name:'cool room', tracks }).then(room => {
+            connect( this.accessToken, { name:'default-room', tracks }).then(room => {
                 
                 room.participants.forEach(participantConnected);
                 room.on('participantConnected', participantConnected);
@@ -51,18 +52,18 @@ export default {
 
                     const div = document.createElement('div');
                     div.id = participant.sid;
-                    div.innerText = participant.identity;
+                    div.classList.add("overflow-hidden", "rounded-md", "h-full");
 
                     participant.on('trackSubscribed', track => trackSubscribed(div, track));
                     participant.on('trackUnsubscribed', trackUnsubscribed);
 
                     participant.tracks.forEach(publication => {
                         if (publication.isSubscribed) {
-                        trackSubscribed(div, publication.track);
+                            trackSubscribed(div, publication.track);
                         }
                     });
 
-                    document.body.appendChild(div);
+                    document.getElementById('video-chat-window').appendChild(div);
                 }
 
                 function participantDisconnected(participant) {
