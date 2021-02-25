@@ -5251,65 +5251,40 @@ function _asyncToGenerator(fn) { return function () { var self = this, args = ar
     },
     connectToRoom: function () {
       var _connectToRoom = _asyncToGenerator( /*#__PURE__*/_babel_runtime_regenerator__WEBPACK_IMPORTED_MODULE_0___default.a.mark(function _callee() {
-        var _this, _require, createLocalTracks, connect, tracks, localVideoTrack;
+        var _this2 = this;
+
+        var _this, _require, connect, createLocalVideoTrack, room;
 
         return _babel_runtime_regenerator__WEBPACK_IMPORTED_MODULE_0___default.a.wrap(function _callee$(_context) {
           while (1) {
             switch (_context.prev = _context.next) {
               case 0:
                 _this = this;
-                _require = __webpack_require__(/*! twilio-video */ "./node_modules/twilio-video/es5/index.js"), createLocalTracks = _require.createLocalTracks, connect = _require.connect;
+                _require = __webpack_require__(/*! twilio-video */ "./node_modules/twilio-video/es5/index.js"), connect = _require.connect, createLocalVideoTrack = _require.createLocalVideoTrack; // Join to the Room with the given AccessToken and ConnectOptions.
+
                 _context.next = 4;
-                return createLocalTracks();
+                return connect(this.accessToken, {
+                  audio: true,
+                  video: {
+                    width: 640,
+                    height: 640
+                  }
+                });
 
               case 4:
-                tracks = _context.sent;
-                // Display camera preview.
-                localVideoTrack = tracks.find(function (track) {
-                  return track.kind === 'video';
+                room = _context.sent;
+                // Make the Room available in the JavaScript console for debugging.
+                window.room = room;
+                this.addLocalParticipant(room.localParticipant); // Subscribe to the media published by RemoteParticipants already in the Room.
+
+                room.participants.forEach(function (participant) {
+                  return _this2.addRemoteParticipant(participant);
                 });
-                document.getElementById('video-preview').appendChild(localVideoTrack.attach());
-                connect(this.accessToken, {
-                  name: 'default-room',
-                  tracks: tracks
-                }).then(function (room) {
-                  room.participants.forEach(participantConnected);
-                  room.on('participantConnected', participantConnected);
-
-                  function participantConnected(participant) {
-                    console.log('Participant "%s" connected', participant.identity);
-                    var div = document.createElement('div');
-                    div.id = participant.sid;
-                    div.classList.add("overflow-hidden", "rounded-md", "h-full");
-                    participant.on('trackSubscribed', function (track) {
-                      return trackSubscribed(div, track);
-                    });
-                    participant.on('trackUnsubscribed', trackUnsubscribed);
-                    participant.tracks.forEach(function (publication) {
-                      if (publication.isSubscribed) {
-                        trackSubscribed(div, publication.track);
-                      }
-                    });
-                    document.getElementById('video-chat-window').appendChild(div);
-                  }
-
-                  function participantDisconnected(participant) {
-                    console.log('Participant "%s" disconnected', participant.identity);
-                    document.getElementById(participant.sid).remove();
-                  }
-
-                  function trackSubscribed(div, track) {
-                    div.appendChild(track.attach());
-                  }
-
-                  function trackUnsubscribed(track) {
-                    track.detach().forEach(function (element) {
-                      return element.remove();
-                    });
-                  }
+                room.on('participantConnected', function (participant) {
+                  return _this2.addRemoteParticipant(participant);
                 });
 
-              case 8:
+              case 9:
               case "end":
                 return _context.stop();
             }
@@ -5322,10 +5297,41 @@ function _asyncToGenerator(fn) { return function () { var self = this, args = ar
       }
 
       return connectToRoom;
-    }()
+    }(),
+    addLocalParticipant: function addLocalParticipant(participant) {
+      var _this3 = this;
+
+      // Create the video container
+      this.createVideoContainer(participant); // Attach the 
+
+      participant.tracks.forEach(function (publication) {
+        if ('audio' == publication.kind) return;
+
+        _this3.publishTrack(publication.track, participant);
+      });
+    },
+    addRemoteParticipant: function addRemoteParticipant(participant) {
+      var _this4 = this;
+
+      this.createVideoContainer(participant); // Set up listener to monitor when a track is published and ready for use
+
+      participant.on('trackSubscribed', function (track) {
+        _this4.publishTrack(track, participant);
+      });
+    },
+    createVideoContainer: function createVideoContainer(participant) {
+      // Add a container for the Participant's media.
+      var div = document.createElement('div');
+      div.id = participant.sid;
+      div.classList.add("overflow-hidden", "rounded-md", "bg-gray-100", "z-10");
+      document.getElementById('video-chat-window').appendChild(div);
+    },
+    publishTrack: function publishTrack(track, participant) {
+      var videoContainer = document.getElementById(participant.sid);
+      videoContainer.appendChild(track.attach());
+    }
   },
   mounted: function mounted() {
-    console.log('Video room loading...');
     this.getAccessToken();
   }
 });
@@ -35532,12 +35538,16 @@ var staticRenderFns = [
     var _vm = this
     var _h = _vm.$createElement
     var _c = _vm._self._c || _h
-    return _c("div", { staticClass: "p-5" }, [
-      _c("div", { attrs: { id: "video-chat-window" } }),
+    return _c("div", {}, [
+      _c("div", {
+        staticClass:
+          "fixed bg-gray-300 top-0 bottom-0 w-full h-full overflow-y-scroll grid grid-rows-3 grid-cols-2 md:grid-cols-3 gap-2 px-2 pt-2",
+        attrs: { id: "video-chat-window" }
+      }),
       _vm._v(" "),
       _c("div", {
         staticClass:
-          "fixed bg-gray-600 bottom-0 right-0 w-1/2 md:w-1/3 lg:w-1/4 mr-5 mb-5 sm:mr-10 sm:mb-10 overflow-hidden rounded-md shadow-xl",
+          "fixed bg-gray-600 bottom-0 right-0 w-1/3 lg:w-1/5 mr-5 mb-5 sm:mr-10 sm:mb-10 overflow-hidden rounded-md shadow-xl",
         attrs: { id: "video-preview" }
       })
     ])
